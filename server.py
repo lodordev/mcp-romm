@@ -1,22 +1,32 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 10 tools for browsing platforms, searching ROMs, viewing metadata,
-managing collections, tracking saves, and triggering library scans.
+Provides 19 read-only tools for browsing platforms, searching ROMs, viewing
+metadata, managing collections, tracking saves, and monitoring tasks.
 
-OAuth2 password grant with automatic token refresh and 401 retry.
+All tools are read-only or trigger idempotent scans. No tools delete, modify,
+or upload data. OAuth2 password grant with automatic token refresh and 401 retry.
 
 Tools:
-  romm_status         — Check server configuration and reachability
-  romm_platforms      — List platforms with ROM counts and sizes
-  romm_library_items  — Browse ROMs with filtering and pagination
-  romm_get_item       — Full ROM detail (metadata, saves, user status)
-  romm_search         — Search ROMs by name
-  romm_stats          — Library-wide statistics
-  romm_collections    — List user-curated collections
-  romm_saves          — List save files by ROM or platform
-  romm_user_profile   — Browse by user status (now playing, backlog, etc.)
-  romm_scan_library   — Trigger a background library rescan
+  romm_status              — Check server configuration and reachability
+  romm_platforms           — List platforms with ROM counts and sizes
+  romm_library_items       — Browse ROMs with filtering and pagination
+  romm_recent              — Recently added or updated ROMs
+  romm_get_item            — Full ROM detail (metadata, saves, user status)
+  romm_search              — Search ROMs by name
+  romm_search_by_hash      — Identify a ROM by file hash (MD5, SHA1, SHA256, or CRC)
+  romm_stats               — Library-wide statistics
+  romm_collections         — List user-curated collections
+  romm_collection_detail   — List ROMs in a specific collection
+  romm_smart_collections   — List auto-generated smart collections
+  romm_saves               — List save files by ROM or platform
+  romm_user_profile        — Browse by user status (now playing, backlog, etc.)
+  romm_firmware            — List BIOS/firmware files per platform
+  romm_devices             — List registered devices
+  romm_rom_notes           — View notes on a ROM
+  romm_filters             — Available filter values (genres, regions, etc.)
+  romm_tasks               — Check running/scheduled task status
+  romm_scan_library        — Trigger a background library rescan
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
@@ -25,6 +35,13 @@ Environment variables:
   ROMM_REQUEST_TIMEOUT  — Default request timeout in seconds (default: 30)
   ROMM_REQUEST_TIMEOUT_LONG — Timeout for slow endpoints (default: 60)
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
+
+Security:
+  - All tools are read-only. No create, update, or delete operations exposed.
+  - The only mutation is romm_scan_library which triggers a safe, idempotent rescan.
+  - Credentials are held in memory only, never written to disk.
+  - OAuth2 tokens are scoped to the minimum permissions needed.
+  - TLS verification is enabled by default.
 """
 
 from __future__ import annotations
@@ -87,13 +104,15 @@ class _TokenState:
 
 
 _token = _TokenState()
-# Scopes to request when authenticating. Covers all read operations + tasks.
+
 _DEFAULT_SCOPES = (
     "me.read me.write "
     "roms.read roms.write "
     "roms.user.read roms.user.write "
     "platforms.read platforms.write "
     "assets.read assets.write "
+    "devices.read "
+    "firmware.read "
     "collections.read collections.write "
     "users.read users.write "
     "tasks.run"
@@ -245,7 +264,36 @@ def _fmt_size(size_bytes: int | float | None) -> str:
     return f"{size_bytes} B"
 
 
-# ── Tools ────────────────────────────────────────────────────────────────
+def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
+    """Format a ROM into display lines. Reused across multiple tools."""
+    name = rom.get("name", "Unknown")
+    platform = rom.get("platform_display_name") or rom.get("platform_slug", "?")
+    size = rom.get("fs_size_bytes", 0)
+    rom_id = rom.get("id", "?")
+    summary = rom.get("summary", "")
+    user = rom.get("rom_user", {}) or {}
+    is_fav = user.get("is_favorite", False) if isinstance(user, dict) else False
+
+    lines = []
+    line = f"{index}. {name}" if index else name
+    if platform:
+        line += f" [{platform}]"
+    if is_fav:
+        line += " *"
+    lines.append(line)
+    if size:
+        lines.append(f"   Size: {_fmt_size(size)}")
+    if summary:
+        short = summary[:120]
+        if len(summary) > 120:
+            short += "..."
+        lines.append(f"   {short}")
+    lines.append(f"   ID: {rom_id}")
+    lines.append("")
+    return lines
+
+
+# ── Tools — Status & Stats ──────────────────────────────────────────────
 
 
 @mcp.tool()
@@ -284,6 +332,30 @@ async def romm_status() -> str:
 
 
 @mcp.tool()
+async def romm_stats() -> str:
+    """Get library statistics — platform count, ROM count, saves, total size."""
+    data = await _get("stats")
+
+    if not isinstance(data, dict):
+        return "No stats available."
+
+    lines = ["RomM Library Statistics:\n"]
+    lines.append(f"  Platforms: {data.get('PLATFORMS', 0)}")
+    lines.append(f"  ROMs: {data.get('ROMS', 0)}")
+    lines.append(f"  Saves: {data.get('SAVES', 0)}")
+    lines.append(f"  Save states: {data.get('STATES', 0)}")
+    lines.append(f"  Screenshots: {data.get('SCREENSHOTS', 0)}")
+    total = data.get("TOTAL_FILESIZE_BYTES", 0)
+    if total:
+        lines.append(f"  Total size: {_fmt_size(total)}")
+
+    return "\n".join(lines)
+
+
+# ── Tools — Platforms ────────────────────────────────────────────────────
+
+
+@mcp.tool()
 async def romm_platforms() -> str:
     """List platforms with ROM counts."""
     data = await _get("platforms")
@@ -310,6 +382,9 @@ async def romm_platforms() -> str:
         lines.append(f"    ID: {pid}")
 
     return "\n".join(lines)
+
+
+# ── Tools — ROM Browsing & Search ────────────────────────────────────────
 
 
 @mcp.tool()
@@ -362,29 +437,48 @@ async def romm_library_items(
     total = len(items)
     lines = [f"ROMs (offset {offset}, showing {total}):\n"]
     for i, rom in enumerate(items, 1):
+        lines.extend(_fmt_rom_line(rom, index=i + offset))
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_recent(limit: int = 20) -> str:
+    """Recently added or updated ROMs.
+
+    limit: Number of results (default 20, max 100).
+    """
+    limit = min(max(limit, 1), 100)
+    params: dict = {
+        "limit": limit,
+        "offset": 0,
+        "order_by": "updated_at",
+        "order_dir": "desc",
+    }
+
+    data = await _get("roms", params=params, long_timeout=True)
+
+    items = []
+    if isinstance(data, dict):
+        items = data.get("items", [])
+    elif isinstance(data, list):
+        items = data
+
+    if not items:
+        return "No ROMs found."
+
+    lines = [f"Recently updated ROMs ({len(items)}):\n"]
+    for i, rom in enumerate(items, 1):
         name = rom.get("name", "Unknown")
         platform = rom.get("platform_display_name") or rom.get("platform_slug", "?")
-        size = rom.get("fs_size_bytes", 0)
+        updated = rom.get("updated_at", "")
         rom_id = rom.get("id", "?")
-        summary = rom.get("summary", "")
-        user = rom.get("rom_user", {}) or {}
-        is_fav = user.get("is_favorite", False) if isinstance(user, dict) else False
 
-        line = f"{i + offset}. {name}"
-        if platform:
-            line += f" [{platform}]"
-        if is_fav:
-            line += " *"
+        line = f"  {i}. {name} [{platform}]"
         lines.append(line)
-        if size:
-            lines.append(f"   Size: {_fmt_size(size)}")
-        if summary:
-            short = summary[:120]
-            if len(summary) > 120:
-                short += "..."
-            lines.append(f"   {short}")
-        lines.append(f"   ID: {rom_id}")
-        lines.append("")
+        if updated:
+            lines.append(f"     Updated: {updated}")
+        lines.append(f"     ID: {rom_id}")
 
     return "\n".join(lines)
 
@@ -514,24 +608,73 @@ async def romm_search(query: str, platform_id: int = 0, limit: int = 20) -> str:
 
 
 @mcp.tool()
-async def romm_stats() -> str:
-    """Get library statistics — platform count, ROM count, saves, total size."""
-    data = await _get("stats")
+async def romm_search_by_hash(
+    crc_hash: str = "",
+    md5_hash: str = "",
+    sha1_hash: str = "",
+) -> str:
+    """Identify a ROM by file hash. Provide at least one hash value.
 
-    if not isinstance(data, dict):
-        return "No stats available."
+    crc_hash: CRC32 hash string.
+    md5_hash: MD5 hash string.
+    sha1_hash: SHA1 hash string.
+    """
+    params: dict = {}
+    if crc_hash:
+        params["crc_hash"] = crc_hash.strip()
+    if md5_hash:
+        params["md5_hash"] = md5_hash.strip()
+    if sha1_hash:
+        params["sha1_hash"] = sha1_hash.strip()
 
-    lines = ["RomM Library Statistics:\n"]
-    lines.append(f"  Platforms: {data.get('PLATFORMS', 0)}")
-    lines.append(f"  ROMs: {data.get('ROMS', 0)}")
-    lines.append(f"  Saves: {data.get('SAVES', 0)}")
-    lines.append(f"  Save states: {data.get('STATES', 0)}")
-    lines.append(f"  Screenshots: {data.get('SCREENSHOTS', 0)}")
-    total = data.get("TOTAL_FILESIZE_BYTES", 0)
-    if total:
-        lines.append(f"  Total size: {_fmt_size(total)}")
+    if not params:
+        return "At least one hash value is required (crc_hash, md5_hash, or sha1_hash)."
+
+    data = await _get("roms/by-hash", params=params)
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"No ROM found matching the provided hash."
+
+    name = data.get("name", "Unknown")
+    platform = data.get("platform_display_name") or data.get("platform_slug", "?")
+    rom_id = data.get("id", "?")
+    size = data.get("fs_size_bytes", 0)
+
+    lines = ["Match found:\n"]
+    lines.append(f"  {name} [{platform}]")
+    if size:
+        lines.append(f"  Size: {_fmt_size(size)}")
+    lines.append(f"  ID: {rom_id}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_filters() -> str:
+    """Get available filter values for ROM browsing — genres, regions, languages, tags."""
+    data = await _get("roms/filters", long_timeout=True)
+
+    if not isinstance(data, dict):
+        return "No filter data available."
+
+    lines = ["Available ROM Filters:\n"]
+
+    for key in ("genres", "franchises", "collections", "companies", "regions",
+                "languages", "tags"):
+        values = data.get(key, [])
+        if values:
+            display = ", ".join(str(v) for v in values[:30])
+            if len(values) > 30:
+                display += f"... (+{len(values) - 30} more)"
+            lines.append(f"  {key.title()} ({len(values)}): {display}")
+
+    if len(lines) == 1:
+        return "No filters available (library may be empty)."
+
+    return "\n".join(lines)
+
+
+# ── Tools — Collections ─────────────────────────────────────────────────
 
 
 @mcp.tool()
@@ -560,6 +703,73 @@ async def romm_collections() -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_collection_detail(collection_id: int) -> str:
+    """List ROMs in a specific collection.
+
+    collection_id: The collection's ID (from romm_collections).
+    """
+    data = await _get(f"collections/{collection_id}")
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"Collection {collection_id} not found."
+
+    name = data.get("name", "Unknown")
+    desc = data.get("description", "")
+    roms = data.get("roms", [])
+
+    lines = [f"{name}"]
+    if desc:
+        lines.append(f"  {desc[:200]}")
+    lines.append(f"  ROMs: {len(roms)}\n")
+
+    if isinstance(roms, list):
+        for i, rom in enumerate(roms[:50], 1):
+            if isinstance(rom, dict):
+                rom_name = rom.get("name") or rom.get("rom_name", "Unknown")
+                platform = rom.get("platform_display_name") or rom.get("platform_slug", "")
+                line = f"  {i}. {rom_name}"
+                if platform:
+                    line += f" [{platform}]"
+                lines.append(line)
+            else:
+                lines.append(f"  {i}. ROM ID: {rom}")
+
+        if len(roms) > 50:
+            lines.append(f"\n  ({len(roms) - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_smart_collections() -> str:
+    """List auto-generated smart collections (rule-based)."""
+    data = await _get("collections/smart")
+
+    if not isinstance(data, list) or not data:
+        return "No smart collections found."
+
+    lines = [f"Smart Collections ({len(data)}):\n"]
+    for c in data:
+        name = c.get("name", "Unknown")
+        desc = c.get("description", "")
+        cid = c.get("id", "?")
+
+        lines.append(f"  {name}")
+        if desc:
+            short = desc[:100]
+            if len(desc) > 100:
+                short += "..."
+            lines.append(f"    {short}")
+        lines.append(f"    ID: {cid}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ── Tools — Saves & User Status ──────────────────────────────────────────
 
 
 @mcp.tool()
@@ -652,6 +862,144 @@ async def romm_user_profile(status_filter: str = "") -> str:
         lines.append(f"     ID: {rom_id}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_rom_notes(rom_id: int) -> str:
+    """View notes on a ROM.
+
+    rom_id: The ROM's ID (from romm_library_items or romm_search).
+    """
+    data = await _get(f"roms/{rom_id}/notes")
+
+    if not isinstance(data, list) or not data:
+        return f"No notes found for ROM {rom_id}."
+
+    lines = [f"Notes for ROM {rom_id} ({len(data)}):\n"]
+    for n in data:
+        body = n.get("raw_markdown") or n.get("body", "")
+        created = n.get("created_at", "")
+        updated = n.get("updated_at", "")
+        note_id = n.get("id", "?")
+
+        if body:
+            short = body[:300]
+            if len(body) > 300:
+                short += "..."
+            lines.append(f"  [{note_id}] {short}")
+        if created:
+            line = f"    Created: {created}"
+            if updated and updated != created:
+                line += f" | Updated: {updated}"
+            lines.append(line)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ── Tools — Firmware & Devices ───────────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_firmware(platform_id: int = 0) -> str:
+    """List BIOS/firmware files. Optionally filter by platform.
+
+    platform_id: Filter to a specific platform (0 = all).
+    """
+    params: dict = {}
+    if platform_id:
+        params["platform_id"] = platform_id
+
+    data = await _get("firmware", params=params)
+
+    if not isinstance(data, list) or not data:
+        qualifier = f" for platform {platform_id}" if platform_id else ""
+        return f"No firmware found{qualifier}."
+
+    lines = [f"Firmware ({len(data)}):\n"]
+    for fw in data[:50]:
+        fname = fw.get("file_name", "?")
+        size = fw.get("file_size_bytes", 0)
+        platform = fw.get("platform_slug", "")
+        fw_id = fw.get("id", "?")
+
+        line = f"  - {fname}"
+        if platform:
+            line += f" [{platform}]"
+        if size:
+            line += f" — {_fmt_size(size)}"
+        lines.append(line)
+        lines.append(f"    ID: {fw_id}")
+
+    if len(data) > 50:
+        lines.append(f"\n  ({len(data) - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_devices() -> str:
+    """List registered devices (handhelds, emulators, etc.)."""
+    data = await _get("devices")
+
+    if not isinstance(data, list) or not data:
+        return "No devices registered."
+
+    lines = [f"Devices ({len(data)}):\n"]
+    for d in data:
+        name = d.get("name", "Unknown")
+        device_type = d.get("type", "")
+        device_id = d.get("id", "?")
+
+        line = f"  - {name}"
+        if device_type:
+            line += f" ({device_type})"
+        lines.append(line)
+        lines.append(f"    ID: {device_id}")
+
+    return "\n".join(lines)
+
+
+# ── Tools — Tasks ────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_tasks() -> str:
+    """Check running and scheduled task status."""
+    data = await _get("tasks/status")
+
+    if not isinstance(data, (dict, list)):
+        return "No task data available."
+
+    if isinstance(data, dict):
+        lines = ["Task Status:\n"]
+        for task_name, info in data.items():
+            if isinstance(info, dict):
+                status = info.get("status", "unknown")
+                last_run = info.get("last_run", "")
+                next_run = info.get("next_run", "")
+                line = f"  {task_name}: {status}"
+                if last_run:
+                    line += f" (last: {last_run})"
+                if next_run:
+                    line += f" (next: {next_run})"
+                lines.append(line)
+            else:
+                lines.append(f"  {task_name}: {info}")
+        return "\n".join(lines)
+
+    if isinstance(data, list):
+        lines = [f"Tasks ({len(data)}):\n"]
+        for t in data:
+            if isinstance(t, dict):
+                name = t.get("name", t.get("task_name", "Unknown"))
+                status = t.get("status", "unknown")
+                lines.append(f"  - {name}: {status}")
+            else:
+                lines.append(f"  - {t}")
+        return "\n".join(lines)
+
+    return "Unexpected task data format."
 
 
 @mcp.tool()
