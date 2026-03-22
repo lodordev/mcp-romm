@@ -2,6 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. Browse platforms, search ROMs, view metadata, manage collections, and track saves through any MCP-compatible AI assistant.
 
+[![mcp-romm MCP server](https://glama.ai/mcp/servers/lodordev/mcp-romm/badges/card.svg)](https://glama.ai/mcp/servers/lodordev/mcp-romm)
+
 ## Tools
 
 | Tool | Description |
