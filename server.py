@@ -87,6 +87,18 @@ class _TokenState:
 
 
 _token = _TokenState()
+# Scopes to request when authenticating. Covers all read operations + tasks.
+_DEFAULT_SCOPES = (
+    "me.read me.write "
+    "roms.read roms.write "
+    "roms.user.read roms.user.write "
+    "platforms.read platforms.write "
+    "assets.read assets.write "
+    "collections.read collections.write "
+    "users.read users.write "
+    "tasks.run"
+)
+
 _clients: dict[str, httpx.AsyncClient] = {}
 
 
@@ -117,6 +129,7 @@ async def _acquire_token() -> str:
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": _token.refresh_token,
+                    "scope": _DEFAULT_SCOPES,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -136,6 +149,7 @@ async def _acquire_token() -> str:
                 "grant_type": "password",
                 "username": cfg.romm_username,
                 "password": cfg.romm_password,
+                "scope": _DEFAULT_SCOPES,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
