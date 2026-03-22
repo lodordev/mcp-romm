@@ -1,5 +1,5 @@
 [project]
-name = "romm-mcp"
+name = "mcp-romm"
 version = "0.1.0"
 description = "MCP server for RomM — browse and manage your retro game library with AI"
 readme = "README.md"
