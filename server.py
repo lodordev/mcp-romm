@@ -1,11 +1,14 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 19 read-only tools for browsing platforms, searching ROMs, viewing
-metadata, managing collections, tracking saves, and monitoring tasks.
+Provides 28 tools: 19 read-only for browsing, searching, and viewing metadata,
+plus 9 write tools for setting play status, favoriting, notes, and managing
+collections.
 
-All tools are read-only or trigger idempotent scans. No tools delete, modify,
-or upload data. OAuth2 password grant with automatic token refresh and 401 retry.
+Write tools change only your own user data (play status, favorites, notes) and
+your own collections. No tool modifies ROM files, platforms, firmware, other
+users, or uploads/deletes save files. OAuth2 password grant with automatic
+token refresh and 401 retry.
 
 Tools:
   romm_status              — Check server configuration and reachability
@@ -28,6 +31,17 @@ Tools:
   romm_tasks               — Check running/scheduled task status
   romm_scan_library        — Trigger a background library rescan
 
+Write tools (modify your user data and collections):
+  romm_set_status          — Set play status, backlog, now-playing, rating, completion
+  romm_favorite            — Add or remove a ROM from your favorites
+  romm_add_note            — Add a note to a ROM
+  romm_update_note         — Edit an existing note
+  romm_delete_note         — Delete a note (permanent)
+  romm_create_collection   — Create a new collection
+  romm_add_to_collection   — Add ROMs to a collection
+  romm_remove_from_collection — Remove ROMs from a collection
+  romm_delete_collection   — Delete a collection (permanent)
+
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
   ROMM_USERNAME         — RomM username (required)
@@ -37,10 +51,13 @@ Environment variables:
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
 
 Security:
-  - All tools are read-only. No create, update, or delete operations exposed.
-  - The only mutation is romm_scan_library which triggers a safe, idempotent rescan.
+  - Least privilege: the OAuth2 token requests only read scopes plus
+    roms.user.write, collections.write, and tasks.run — exactly what the tools
+    do. It cannot modify ROM files, platforms, firmware, or other users, and it
+    cannot touch save files.
+  - Write tools that permanently destroy data (romm_delete_note,
+    romm_delete_collection) are clearly labeled as such.
   - Credentials are held in memory only, never written to disk.
-  - OAuth2 tokens are scoped to the minimum permissions needed.
   - TLS verification is enabled by default.
 """
 
@@ -105,16 +122,20 @@ class _TokenState:
 
 _token = _TokenState()
 
+# Least privilege: every read scope the read tools need, plus the two write
+# scopes the write tools actually use (roms.user.write for status/favorites/
+# notes, collections.write for collections) and tasks.run for the rescan.
+# Deliberately NOT requested: roms.write, platforms.write, firmware.write,
+# assets.write, users.write, me.write, devices.write — no tool uses them.
 _DEFAULT_SCOPES = (
-    "me.read me.write "
-    "roms.read roms.write "
+    "me.read "
+    "roms.read "
     "roms.user.read roms.user.write "
-    "platforms.read platforms.write "
-    "assets.read assets.write "
+    "platforms.read "
+    "assets.read "
     "devices.read "
     "firmware.read "
     "collections.read collections.write "
-    "users.read users.write "
     "tasks.run"
 )
 
@@ -193,10 +214,15 @@ async def _request(
     *,
     params: dict | None = None,
     json: dict | None = None,
+    data: dict | None = None,
     long_timeout: bool = False,
     auth_required: bool = True,
 ) -> dict | list:
-    """Make an HTTP request to RomM API. Handles auth and 401 retry."""
+    """Make an HTTP request to RomM API. Handles auth and 401 retry.
+
+    Use `json` for JSON bodies, `data` for url-encoded form fields (RomM's
+    collection-create endpoint takes Form fields rather than JSON).
+    """
     client = _get_client()
     url = f"{cfg.romm_url}/api/{path.lstrip('/')}"
     req_timeout = cfg.request_timeout_long if long_timeout else cfg.request_timeout
@@ -208,7 +234,7 @@ async def _request(
 
     try:
         resp = await client.request(
-            method, url, headers=headers, params=params, json=json,
+            method, url, headers=headers, params=params, json=json, data=data,
             timeout=req_timeout,
         )
 
@@ -217,7 +243,7 @@ async def _request(
             token = await _acquire_token()
             headers["Authorization"] = f"Bearer {token}"
             resp = await client.request(
-                method, url, headers=headers, params=params, json=json,
+                method, url, headers=headers, params=params, json=json, data=data,
                 timeout=req_timeout,
             )
 
@@ -244,8 +270,18 @@ async def _get(path: str, *, params: dict | None = None, long_timeout: bool = Fa
                           auth_required=auth_required)
 
 
-async def _post(path: str, body: dict | None = None, *, long_timeout: bool = False) -> dict | list:
-    return await _request("POST", path, json=body, long_timeout=long_timeout)
+async def _post(path: str, body: dict | None = None, *, params: dict | None = None,
+                data: dict | None = None, long_timeout: bool = False) -> dict | list:
+    return await _request("POST", path, params=params, json=body, data=data,
+                          long_timeout=long_timeout)
+
+
+async def _put(path: str, body: dict | None = None, *, params: dict | None = None) -> dict | list:
+    return await _request("PUT", path, json=body, params=params)
+
+
+async def _delete(path: str, body: dict | None = None) -> dict | list:
+    return await _request("DELETE", path, json=body)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -520,7 +556,7 @@ async def romm_get_item(rom_id: int) -> str:
     if regions:
         lines.append(f"  Regions: {', '.join(str(r) for r in regions)}")
     if languages:
-        lines.append(f"  Languages: {', '.join(str(l) for l in languages)}")
+        lines.append(f"  Languages: {', '.join(str(lang) for lang in languages)}")
     if tags:
         lines.append(f"  Tags: {', '.join(str(t) for t in tags)}")
     if alt_names:
@@ -633,7 +669,7 @@ async def romm_search_by_hash(
     data = await _get("roms/by-hash", params=params)
 
     if not isinstance(data, dict) or "id" not in data:
-        return f"No ROM found matching the provided hash."
+        return "No ROM found matching the provided hash."
 
     name = data.get("name", "Unknown")
     platform = data.get("platform_display_name") or data.get("platform_slug", "?")
@@ -877,16 +913,27 @@ async def romm_rom_notes(rom_id: int) -> str:
 
     lines = [f"Notes for ROM {rom_id} ({len(data)}):\n"]
     for n in data:
-        body = n.get("raw_markdown") or n.get("body", "")
+        title = n.get("title", "")
+        content = n.get("content", "")
         created = n.get("created_at", "")
         updated = n.get("updated_at", "")
         note_id = n.get("id", "?")
+        username = n.get("username", "")
+        is_public = n.get("is_public", False)
 
-        if body:
-            short = body[:300]
-            if len(body) > 300:
+        header = f"  [{note_id}]"
+        if title:
+            header += f" {title}"
+        if username:
+            header += f" — by {username}"
+        if is_public:
+            header += " (public)"
+        lines.append(header)
+        if content:
+            short = content[:300]
+            if len(content) > 300:
                 short += "..."
-            lines.append(f"  [{note_id}] {short}")
+            lines.append(f"      {short}")
         if created:
             line = f"    Created: {created}"
             if updated and updated != created:
@@ -1020,6 +1067,272 @@ async def romm_scan_library() -> str:
         if "422" in str(e) or "not enabled" in str(e).lower():
             return "Library scan task is not enabled in RomM settings. Enable scheduled rescan first."
         raise
+
+
+# ── Tools — Write: play status & favorites ───────────────────────────────
+
+
+_VALID_STATUSES = ("incomplete", "finished", "completed_100", "retired", "never_playing")
+
+
+@mcp.tool()
+async def romm_set_status(
+    rom_id: int,
+    status: str = "",
+    backlogged: bool | None = None,
+    now_playing: bool | None = None,
+    rating: int = -1,
+    completion: int = -1,
+    mark_played: bool = False,
+    clear_played: bool = False,
+) -> str:
+    """Set your personal play status on a ROM. Modifies only your own user data.
+
+    Provide only the fields you want to change; omitted fields are left as-is.
+
+    rom_id: The ROM's ID (from romm_search or romm_library_items).
+    status: Play status — one of "incomplete", "finished", "completed_100",
+            "retired", "never_playing". Empty = leave unchanged.
+    backlogged: true/false to mark/unmark backlogged. Omit to leave unchanged.
+    now_playing: true/false to mark/unmark as currently playing. Omit to leave unchanged.
+    rating: 0-10 rating. -1 (default) = leave unchanged.
+    completion: 0-100 percent complete. -1 (default) = leave unchanged.
+    mark_played: Set the last-played timestamp to now.
+    clear_played: Clear the last-played timestamp (mutually exclusive with mark_played).
+    """
+    if mark_played and clear_played:
+        return "mark_played and clear_played are mutually exclusive."
+
+    body: dict = {}
+    if status:
+        if status not in _VALID_STATUSES:
+            return f"Invalid status '{status}'. Valid: {', '.join(_VALID_STATUSES)}."
+        body["status"] = status
+    if backlogged is not None:
+        body["backlogged"] = backlogged
+    if now_playing is not None:
+        body["now_playing"] = now_playing
+    if rating >= 0:
+        if rating > 10:
+            return "rating must be between 0 and 10."
+        body["rating"] = rating
+    if completion >= 0:
+        if completion > 100:
+            return "completion must be between 0 and 100."
+        body["completion"] = completion
+
+    if not body and not mark_played and not clear_played:
+        return "Nothing to update — provide at least one field to change."
+
+    params: dict = {}
+    if mark_played:
+        params["update_last_played"] = True
+    if clear_played:
+        params["remove_last_played"] = True
+
+    data = await _put(f"roms/{rom_id}/props", body, params=params or None)
+
+    if not isinstance(data, dict):
+        return f"Updated ROM {rom_id}."
+
+    parts = []
+    if "status" in body:
+        parts.append(f"status={data.get('status')}")
+    if "backlogged" in body:
+        parts.append(f"backlogged={data.get('backlogged')}")
+    if "now_playing" in body:
+        parts.append(f"now_playing={data.get('now_playing')}")
+    if "rating" in body:
+        parts.append(f"rating={data.get('rating')}")
+    if "completion" in body:
+        parts.append(f"completion={data.get('completion')}%")
+    if mark_played:
+        parts.append(f"last_played={data.get('last_played')}")
+    if clear_played:
+        parts.append("last_played cleared")
+
+    detail = ", ".join(parts) if parts else "updated"
+    return f"ROM {rom_id}: {detail}."
+
+
+async def _favorite_collection() -> dict | None:
+    """Return the user's favorites collection (is_favorite=True), or None."""
+    data = await _get("collections")
+    if isinstance(data, list):
+        for c in data:
+            if isinstance(c, dict) and c.get("is_favorite"):
+                return c
+    return None
+
+
+@mcp.tool()
+async def romm_favorite(rom_id: int, favorite: bool = True) -> str:
+    """Add or remove a ROM from your Favorites.
+
+    In RomM, favorites are a special collection. This finds (or creates) your
+    favorites collection and adds/removes the ROM.
+
+    rom_id: The ROM's ID.
+    favorite: True to favorite (default), False to unfavorite.
+    """
+    fav = await _favorite_collection()
+
+    if fav is None:
+        if not favorite:
+            return "You have no favorites collection yet — nothing to remove."
+        created = await _post(
+            "collections",
+            data={"name": "Favourites", "description": ""},
+            params={"is_favorite": True},
+        )
+        fav = created if isinstance(created, dict) and "id" in created else None
+        if fav is None:
+            return "Could not create a favorites collection."
+
+    cid = fav["id"]
+    if favorite:
+        await _post(f"collections/{cid}/roms", {"rom_ids": [rom_id]})
+        return f"Added ROM {rom_id} to Favorites."
+    await _delete(f"collections/{cid}/roms", {"rom_ids": [rom_id]})
+    return f"Removed ROM {rom_id} from Favorites."
+
+
+# ── Tools — Write: notes ─────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_add_note(
+    rom_id: int,
+    title: str,
+    content: str = "",
+    tags: list[str] | None = None,
+    is_public: bool = False,
+) -> str:
+    """Add a note to a ROM. The note belongs to you.
+
+    rom_id: The ROM's ID.
+    title: Note title (required).
+    content: Note body in markdown (optional).
+    tags: Optional list of tag strings.
+    is_public: Whether other RomM users can see the note (default: false).
+    """
+    if not title.strip():
+        return "title is required."
+    body = {
+        "title": title,
+        "content": content,
+        "is_public": is_public,
+        "tags": tags or [],
+    }
+    data = await _post(f"roms/{rom_id}/notes", body)
+    note_id = data.get("id", "?") if isinstance(data, dict) else "?"
+    return f"Added note to ROM {rom_id} (note id: {note_id})."
+
+
+@mcp.tool()
+async def romm_update_note(
+    rom_id: int,
+    note_id: int,
+    title: str = "",
+    content: str = "",
+    tags: list[str] | None = None,
+    is_public: bool | None = None,
+) -> str:
+    """Edit an existing note. Only the fields you provide are changed.
+
+    rom_id: The ROM's ID.
+    note_id: The note's ID (from romm_rom_notes).
+    title: New title (empty = unchanged).
+    content: New body (empty = unchanged).
+    tags: New tag list (omit to leave unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    """
+    body: dict = {}
+    if title:
+        body["title"] = title
+    if content:
+        body["content"] = content
+    if tags is not None:
+        body["tags"] = tags
+    if is_public is not None:
+        body["is_public"] = is_public
+
+    if not body:
+        return "Nothing to update — provide a field to change."
+
+    await _put(f"roms/{rom_id}/notes/{note_id}", body)
+    return f"Updated note {note_id} on ROM {rom_id}."
+
+
+@mcp.tool()
+async def romm_delete_note(rom_id: int, note_id: int) -> str:
+    """Permanently delete a note. This cannot be undone.
+
+    rom_id: The ROM's ID.
+    note_id: The note's ID (from romm_rom_notes).
+    """
+    await _delete(f"roms/{rom_id}/notes/{note_id}")
+    return f"Deleted note {note_id} from ROM {rom_id}."
+
+
+# ── Tools — Write: collections ───────────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_create_collection(name: str, description: str = "") -> str:
+    """Create a new user collection.
+
+    name: Collection name (required).
+    description: Optional description.
+    """
+    if not name.strip():
+        return "name is required."
+    data = await _post("collections", data={"name": name, "description": description})
+    if isinstance(data, dict) and "id" in data:
+        return f"Created collection \"{data.get('name', name)}\" (id: {data['id']})."
+    return f"Created collection \"{name}\"."
+
+
+@mcp.tool()
+async def romm_add_to_collection(collection_id: int, rom_ids: list[int]) -> str:
+    """Add one or more ROMs to a collection (without replacing the existing list).
+
+    collection_id: The collection's ID (from romm_collections).
+    rom_ids: List of ROM IDs to add.
+    """
+    if not rom_ids:
+        return "Provide at least one ROM ID."
+    data = await _post(f"collections/{collection_id}/roms", {"rom_ids": rom_ids})
+    count = len(data.get("rom_ids", [])) if isinstance(data, dict) else None
+    suffix = f" Collection now has {count} ROMs." if count is not None else ""
+    return f"Added {len(rom_ids)} ROM(s) to collection {collection_id}.{suffix}"
+
+
+@mcp.tool()
+async def romm_remove_from_collection(collection_id: int, rom_ids: list[int]) -> str:
+    """Remove one or more ROMs from a collection (without deleting the collection).
+
+    collection_id: The collection's ID (from romm_collections).
+    rom_ids: List of ROM IDs to remove.
+    """
+    if not rom_ids:
+        return "Provide at least one ROM ID."
+    data = await _delete(f"collections/{collection_id}/roms", {"rom_ids": rom_ids})
+    count = len(data.get("rom_ids", [])) if isinstance(data, dict) else None
+    suffix = f" Collection now has {count} ROMs." if count is not None else ""
+    return f"Removed {len(rom_ids)} ROM(s) from collection {collection_id}.{suffix}"
+
+
+@mcp.tool()
+async def romm_delete_collection(collection_id: int) -> str:
+    """Permanently delete a collection. This cannot be undone.
+
+    The ROMs themselves are not deleted — only the collection grouping.
+
+    collection_id: The collection's ID (from romm_collections).
+    """
+    await _delete(f"collections/{collection_id}")
+    return f"Deleted collection {collection_id}."
 
 
 if __name__ == "__main__":

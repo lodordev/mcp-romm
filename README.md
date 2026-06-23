@@ -1,8 +1,10 @@
 # RomM MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 19 read-only tools for browsing platforms, searching ROMs, viewing metadata, managing collections, tracking saves, and monitoring tasks through any MCP-compatible AI assistant.
+An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 28 tools: 19 read-only for browsing platforms, searching ROMs, viewing metadata, collections, saves, and tasks — plus 9 write tools for setting play status, favoriting, notes, and managing collections, through any MCP-compatible AI assistant.
 
 ## Tools
+
+### Read
 
 | Tool | Description |
 |------|-------------|
@@ -25,6 +27,22 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_devices` | List registered devices |
 | `romm_tasks` | Check running/scheduled task status |
 | `romm_scan_library` | Trigger a background library rescan |
+
+### Write
+
+These modify **your own** user data and collections. They cannot alter ROM files, platforms, firmware, other users, or save files.
+
+| Tool | Description |
+|------|-------------|
+| `romm_set_status` | Set play status, backlog, now-playing, rating, completion, last-played |
+| `romm_favorite` | Add or remove a ROM from your favorites |
+| `romm_add_note` | Add a note to a ROM |
+| `romm_update_note` | Edit an existing note |
+| `romm_delete_note` | Delete a note (permanent) |
+| `romm_create_collection` | Create a new collection |
+| `romm_add_to_collection` | Add ROMs to a collection |
+| `romm_remove_from_collection` | Remove ROMs from a collection |
+| `romm_delete_collection` | Delete a collection — the grouping only, not the ROMs (permanent) |
 
 ## Setup
 
@@ -116,11 +134,20 @@ Once configured, you can ask your AI assistant things like:
 - "What tasks are running?"
 - "What devices are registered?"
 
+And, with the write tools:
+
+- "Mark Chrono Trigger as finished"
+- "Favorite Super Metroid"
+- "Add it to my backlog and rate it 9"
+- "Make a collection called 'SNES RPGs' and add ROMs 10, 11, and 12"
+- "Add a note to this ROM: 'glitch at the second boss, save often'"
+
 ## Security
 
-- **Read-only.** All 19 tools are read-only. The only mutation is `romm_scan_library`, which triggers an idempotent library rescan.
+- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write`, `collections.write`, and `tasks.run`. It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `assets.write`, `users.write`, or `me.write` — no tool uses them.
+- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes) and your own collections. No tool edits ROM files, platforms, firmware, other users, or uploads/deletes save files.
+- **Destructive ops are labeled.** `romm_delete_note` and `romm_delete_collection` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs.)
 - **No disk writes.** Credentials and tokens are held in memory only, never written to disk.
-- **Scoped tokens.** OAuth2 tokens request only the scopes needed for read operations.
 - **TLS by default.** Certificate verification is enabled by default (`ROMM_TLS_VERIFY=true`).
 - **Auto-retry.** If a token expires mid-session, the server re-authenticates transparently.
 
@@ -128,8 +155,8 @@ Once configured, you can ask your AI assistant things like:
 
 The server uses OAuth2 password grant to authenticate with RomM. Tokens are scoped to the minimum permissions needed and automatically refreshed when they expire. If a request gets a 401, the server re-authenticates and retries once.
 
-**Note:** Your RomM user must have the **admin** role for all tools to work. The user must also be **enabled** in the RomM admin panel.
+**Note:** The read and write tools operate on your own library and user data, so an ordinary **enabled** RomM user account is sufficient — admin is not required. (`romm_scan_library` does require an account permitted to run tasks.)
 
 ## License
 
-MIT
+MIT. See [CHANGELOG.md](CHANGELOG.md) for release history.
