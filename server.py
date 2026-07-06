@@ -47,8 +47,10 @@ Write tools (modify your user data and collections):
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
-  ROMM_USERNAME         — RomM username (required)
-  ROMM_PASSWORD         — RomM password (required)
+  ROMM_API_TOKEN        — RomM client API token (rmm_...) — preferred; when set,
+                          username/password are not needed
+  ROMM_USERNAME         — RomM username (required unless ROMM_API_TOKEN is set)
+  ROMM_PASSWORD         — RomM password (required unless ROMM_API_TOKEN is set)
   ROMM_REQUEST_TIMEOUT  — Default request timeout in seconds (default: 30)
   ROMM_REQUEST_TIMEOUT_LONG — Timeout for slow endpoints (default: 60)
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
@@ -85,6 +87,7 @@ class Config:
     romm_url: str
     romm_username: str
     romm_password: str
+    romm_api_token: str
     request_timeout: int
     request_timeout_long: int
     tls_verify: bool
@@ -93,12 +96,14 @@ class Config:
     def from_env(cls) -> Config:
         username = os.getenv("ROMM_USERNAME", "")
         password = os.getenv("ROMM_PASSWORD", "")
-        if not username or not password:
-            log.warning("ROMM_USERNAME/ROMM_PASSWORD not set — all tools will fail")
+        api_token = os.getenv("ROMM_API_TOKEN", "")
+        if not api_token and (not username or not password):
+            log.warning("Set ROMM_API_TOKEN or ROMM_USERNAME/ROMM_PASSWORD — all tools will fail")
         return cls(
             romm_url=os.getenv("ROMM_URL", "http://localhost:3000").rstrip("/"),
             romm_username=username,
             romm_password=password,
+            romm_api_token=api_token,
             request_timeout=int(os.getenv("ROMM_REQUEST_TIMEOUT", "30")),
             request_timeout_long=int(os.getenv("ROMM_REQUEST_TIMEOUT_LONG", "60")),
             tls_verify=os.getenv("ROMM_TLS_VERIFY", "true").lower() in ("true", "1", "yes"),
@@ -106,7 +111,7 @@ class Config:
 
     @property
     def configured(self) -> bool:
-        return bool(self.romm_url and self.romm_username and self.romm_password)
+        return bool(self.romm_url and (self.romm_api_token or (self.romm_username and self.romm_password)))
 
 
 cfg = Config.from_env()
@@ -142,6 +147,24 @@ _DEFAULT_SCOPES = (
     "tasks.run"
 )
 
+# RomM 5.0 makes scope availability admin-configurable per permission group (the
+# static role→scope map is gone), so the full request above can now be REJECTED at
+# token time for a locked-down account. Rather than failing every tool, fall back
+# to the read-only core; write tools then return the server's honest permission
+# error instead of the whole server being dead. Which set is active is reported by
+# romm_status.
+_READONLY_SCOPES = (
+    "me.read "
+    "roms.read "
+    "roms.user.read "
+    "platforms.read "
+    "assets.read "
+    "devices.read "
+    "firmware.read "
+    "collections.read"
+)
+_active_scopes: dict = {"scopes": _DEFAULT_SCOPES, "degraded": False}
+
 _clients: dict[str, httpx.AsyncClient] = {}
 
 
@@ -156,7 +179,16 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def _acquire_token() -> str:
-    """Get a valid access token, refreshing or re-authenticating as needed."""
+    """Get a valid access token, refreshing or re-authenticating as needed.
+
+    With ROMM_API_TOKEN set (a RomM client API token, `rmm_...`), that token IS
+    the credential — no OAuth dance, no refresh, no expiry bookkeeping. This is
+    the direction the RomM ecosystem is moving (password-grant phase-out in
+    first-party clients); both paths are supported.
+    """
+    if cfg.romm_api_token:
+        return cfg.romm_api_token
+
     now = time.time()
 
     if _token.access_token and _token.expires_at > now + 60:
@@ -172,7 +204,7 @@ async def _acquire_token() -> str:
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": _token.refresh_token,
-                    "scope": _DEFAULT_SCOPES,
+                    "scope": _active_scopes["scopes"],
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -184,7 +216,8 @@ async def _acquire_token() -> str:
         except Exception:
             log.debug("Token refresh failed, falling back to password grant")
 
-    # Password grant
+    # Password grant — full scopes first; on a scope rejection (RomM 5.0
+    # permission groups can deny write/task scopes) retry read-only.
     try:
         resp = await client.post(
             f"{cfg.romm_url}/api/token",
@@ -192,10 +225,24 @@ async def _acquire_token() -> str:
                 "grant_type": "password",
                 "username": cfg.romm_username,
                 "password": cfg.romm_password,
-                "scope": _DEFAULT_SCOPES,
+                "scope": _active_scopes["scopes"],
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        if resp.status_code in (400, 403) and not _active_scopes["degraded"]:
+            log.warning("Full scope set rejected (%d) — retrying read-only", resp.status_code)
+            _active_scopes["scopes"] = _READONLY_SCOPES
+            _active_scopes["degraded"] = True
+            resp = await client.post(
+                f"{cfg.romm_url}/api/token",
+                data={
+                    "grant_type": "password",
+                    "username": cfg.romm_username,
+                    "password": cfg.romm_password,
+                    "scope": _READONLY_SCOPES,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
         resp.raise_for_status()
         data = resp.json()
         _token.access_token = data["access_token"]
@@ -400,7 +447,13 @@ async def romm_status() -> str:
     """Check RomM MCP server configuration and reachability."""
     lines = ["RomM MCP Status:\n"]
     lines.append(f"  URL: {cfg.romm_url}")
-    lines.append(f"  Username: {cfg.romm_username}")
+    if cfg.romm_api_token:
+        lines.append("  Auth: client API token (ROMM_API_TOKEN)")
+    else:
+        lines.append(f"  Auth: OAuth password grant — user {cfg.romm_username}")
+        if _active_scopes["degraded"]:
+            lines.append("  ⚠ Scopes: DEGRADED to read-only (server rejected the write/task scopes"
+                         " — check this account's permission group). Write tools will fail honestly.")
     lines.append(f"  TLS verify: {cfg.tls_verify}")
     lines.append(f"  Timeouts: {cfg.request_timeout}s / {cfg.request_timeout_long}s (long)\n")
 

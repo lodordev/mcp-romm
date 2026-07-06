@@ -75,8 +75,9 @@ Set environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ROMM_URL` | No | `http://localhost:3000` | Your RomM instance URL |
-| `ROMM_USERNAME` | **Yes** | | RomM username |
-| `ROMM_PASSWORD` | **Yes** | | RomM password |
+| `ROMM_API_TOKEN` | One of | | RomM client API token (`rmm_...`, created under Settings → Client Tokens) — the preferred credential; username/password are not needed with it |
+| `ROMM_USERNAME` | One of | | RomM username (with `ROMM_PASSWORD`, when no API token) |
+| `ROMM_PASSWORD` | One of | | RomM password |
 | `ROMM_REQUEST_TIMEOUT` | No | `30` | Default request timeout (seconds) |
 | `ROMM_REQUEST_TIMEOUT_LONG` | No | `60` | Timeout for slow endpoints |
 | `ROMM_TLS_VERIFY` | No | `true` | Verify TLS certificates |
@@ -120,6 +121,20 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   }
 }
 ```
+
+## RomM 5.0
+
+Tested against the RomM **5.0.0-beta.1** API surface (stable is 4.9.x at the time of
+writing): the endpoints this server uses are unchanged in 5.0, OAuth password grant
+survives, and client API tokens work today via `ROMM_API_TOKEN`. Two 5.0 behaviors are
+handled explicitly:
+
+- **Admin-configurable scopes** (the permissions engine): if your account's permission
+  group rejects the default write/task scopes at token time, the server automatically
+  retries with a read-only scope set instead of failing every tool — `romm_status`
+  reports when this happened, and write tools return the server's own permission error.
+- `romm_status` reports the detected server version and capability flags
+  (device save sync ≥4.9, 5.x generation).
 
 ## Examples
 

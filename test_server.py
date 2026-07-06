@@ -327,3 +327,43 @@ async def test_states_empty(calls):
     calls.responses.append([])
     out = await server.romm_states(platform_id=3)
     assert "No save states found" in out
+
+
+# ── Auth: client token + scope degradation ───────────────────────────────
+
+
+async def test_api_token_short_circuits_oauth(monkeypatch):
+    # Config is a frozen dataclass — swap the module-level cfg for the test.
+    token_cfg = server.Config(
+        romm_url=server.cfg.romm_url, romm_username="", romm_password="",
+        romm_api_token="rmm_testtoken", request_timeout=30,
+        request_timeout_long=60, tls_verify=True,
+    )
+    monkeypatch.setattr(server, "cfg", token_cfg)
+    tok = await server._acquire_token()
+    assert tok == "rmm_testtoken"
+
+
+def test_configured_with_token_only():
+    c = server.Config(
+        romm_url="http://x", romm_username="", romm_password="",
+        romm_api_token="rmm_abc", request_timeout=30,
+        request_timeout_long=60, tls_verify=True,
+    )
+    assert c.configured
+
+
+def test_not_configured_without_any_credential():
+    c = server.Config(
+        romm_url="http://x", romm_username="", romm_password="",
+        romm_api_token="", request_timeout=30,
+        request_timeout_long=60, tls_verify=True,
+    )
+    assert not c.configured
+
+
+def test_readonly_scopes_are_a_subset_without_writes():
+    full = set(server._DEFAULT_SCOPES.split())
+    ro = set(server._READONLY_SCOPES.split())
+    assert ro < full
+    assert not any(s.endswith(".write") or s == "tasks.run" for s in ro)

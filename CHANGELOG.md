@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.1.0
+
+RomM 5.0 readiness + save-sync fleet visibility.
+
+### Added
+
+- **`romm_save_timeline`** — per-ROM save revision timeline: content hashes,
+  per-device sync attribution (RomM 4.9+ device save sync), broken-record and
+  sidecar flagging, and a divergence warning when two devices currently hold
+  different save content.
+- **`romm_states`** — list save states (suspend points) by ROM or platform.
+- **`ROMM_API_TOKEN`** — authenticate with a RomM client API token (`rmm_...`)
+  instead of username/password; the direction the RomM ecosystem is moving.
+- `romm_status` reports server version + capability flags, the auth mode in
+  use, and scope degradation.
+
+### Changed
+
+- RomM 5.0's permissions engine can reject the default scope request at token
+  time; the server now degrades to a read-only scope set instead of failing
+  every tool (write tools then surface the server's permission error).
+
+### Notes
+
+- Verified against the 5.0.0-beta.1 API surface: no endpoint this server uses
+  changed; the removed `/api/raw/assets` route was never used here. Re-verify
+  at 5.0 stable.
+
 ## 1.0.0
 
 First stable release. The server now both reads and writes: in addition to the
