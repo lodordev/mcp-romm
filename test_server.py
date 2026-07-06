@@ -242,3 +242,88 @@ async def test_delete_collection(calls):
     assert calls[0]["method"] == "DELETE"
     assert calls[0]["path"] == "collections/4"
     assert "Deleted collection 4" in out
+
+
+# ── Version / capability helpers ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("ver,minimum,expected", [
+    ("4.9.2", (4, 9, 0), True),
+    ("4.8.9", (4, 9, 0), False),
+    ("5.0.0", (5, 0, 0), True),
+    ("v5.0.1", (5, 0, 0), True),
+    ("5.0.0-rc1", (5, 0, 0), True),   # lenient by design: tails are cut
+    ("4.9", (4, 9, 0), True),
+    ("", (4, 9, 0), False),
+    ("garbage", (4, 9, 0), False),
+])
+def test_version_at_least(ver, minimum, expected):
+    assert server._version_at_least(ver, minimum) is expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Game (USA).gba.lodortime", True),
+    ("Game (USA).gba.lodorshot.png", True),
+    ("Game (USA).gba.sav", False),
+    ("Game.srm", False),
+])
+def test_is_lodor_meta(name, expected):
+    assert server._is_lodor_meta(name) is expected
+
+
+# ── Lodor fleet tools ────────────────────────────────────────────────────
+
+
+async def test_save_timeline_flags_divergence_ghosts_and_metas(calls):
+    calls.responses.append([
+        {"id": 3, "file_name": "Game.gba.sav", "file_size_bytes": 100,
+         "content_hash": "aaaa1111aaaa1111", "updated_at": "2026-07-06T12:00:00Z",
+         "emulator": "minarch",
+         "device_syncs": [{"device_id": "d1", "device_name": "Flip V2",
+                           "last_synced_at": "2026-07-06T12:00:00Z", "is_current": True}]},
+        {"id": 2, "file_name": "Game.srm", "file_size_bytes": 100,
+         "content_hash": "bbbb2222bbbb2222", "updated_at": "2026-07-05T12:00:00Z",
+         "emulator": "RetroArch",
+         "device_syncs": [{"device_id": "d2", "device_name": "RG34XX",
+                           "last_synced_at": "2026-07-05T12:00:00Z", "is_current": True}]},
+        {"id": 4, "file_name": "Game.gba.sav", "file_size_bytes": 0,
+         "updated_at": "2026-07-04T12:00:00Z"},
+        {"id": 5, "file_name": "Game.gba.lodortime", "file_size_bytes": 42,
+         "updated_at": "2026-07-04T12:00:00Z"},
+    ])
+    out = await server.romm_save_timeline(rom_id=1234)
+    assert calls[0]["path"] == "saves" and calls[0]["params"] == {"rom_id": 1234}
+    assert "2 revision(s)" in out
+    assert "1 broken (0-byte)" in out
+    assert "1 Lodor sidecar(s)" in out
+    assert "DIVERGENCE" in out
+    assert "Flip V2" in out and "RG34XX" in out
+    assert "NEWEST" in out and "aaaa1111" in out
+
+
+async def test_save_timeline_no_divergence_single_holder(calls):
+    calls.responses.append([
+        {"id": 3, "file_name": "Game.gba.sav", "file_size_bytes": 100,
+         "content_hash": "aaaa1111", "updated_at": "2026-07-06T12:00:00Z",
+         "device_syncs": [{"device_name": "Flip V2", "is_current": True,
+                           "last_synced_at": "2026-07-06T12:00:00Z"}]},
+    ])
+    out = await server.romm_save_timeline(rom_id=1)
+    assert "DIVERGENCE" not in out
+    assert "HOLDS CURRENT" in out
+
+
+async def test_states_builds_params_and_formats(calls):
+    calls.responses.append([
+        {"file_name": "Game.state", "rom_name": "Game", "emulator": "snes9x",
+         "file_size_bytes": 2048, "updated_at": "2026-07-06T12:00:00Z"},
+    ])
+    out = await server.romm_states(rom_id=7)
+    assert calls[0]["path"] == "states" and calls[0]["params"] == {"rom_id": 7}
+    assert "Game.state" in out and "snes9x" in out
+
+
+async def test_states_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_states(platform_id=3)
+    assert "No save states found" in out

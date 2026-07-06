@@ -1,9 +1,9 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 28 tools: 19 read-only for browsing, searching, and viewing metadata,
-plus 9 write tools for setting play status, favoriting, notes, and managing
-collections.
+Provides 30 tools: 21 read-only for browsing, searching, viewing metadata, and
+inspecting the device save-sync timeline, plus 9 write tools for setting play
+status, favoriting, notes, and managing collections.
 
 Write tools change only your own user data (play status, favorites, notes) and
 your own collections. No tool modifies ROM files, platforms, firmware, other
@@ -30,6 +30,9 @@ Tools:
   romm_filters             — Available filter values (genres, regions, etc.)
   romm_tasks               — Check running/scheduled task status
   romm_scan_library        — Trigger a background library rescan
+  romm_save_timeline       — Per-ROM save revision timeline with device
+                             attribution and divergence detection (server 4.9+)
+  romm_states              — List save states (suspend points) by ROM/platform
 
 Write tools (modify your user data and collections):
   romm_set_status          — Set play status, backlog, now-playing, rating, completion
@@ -329,6 +332,66 @@ def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
     return lines
 
 
+# ── Server version / capability detection ───────────────────────────────
+
+_version_cache: dict = {"ver": None}
+
+
+async def _server_version() -> str:
+    """RomM version string from GET /api/heartbeat, cached for the process.
+
+    Returns "" when the server is unreachable or omits a version (uncached, so a
+    later call retries). Capability gates treat "" as "not new enough" — fail
+    closed, never fire an endpoint the server may not have.
+    """
+    if _version_cache["ver"] is not None:
+        return _version_cache["ver"]
+    try:
+        data = await _get("heartbeat", auth_required=False)
+    except Exception:
+        return ""
+    ver = ""
+    if isinstance(data, dict):
+        ver = str((data.get("SYSTEM") or {}).get("VERSION", "")).strip()
+    if ver:
+        _version_cache["ver"] = ver
+    return ver
+
+
+def _version_at_least(ver: str, minimum: tuple[int, int, int]) -> bool:
+    """Lenient dotted-version compare: strips a leading 'v', cuts pre-release/build
+    tails, missing components read 0, unparseable reads 0.0.0 (fail closed)."""
+    ver = ver.strip().lstrip("v")
+    if not ver:
+        return False
+    for sep in "-+ ":
+        if sep in ver:
+            ver = ver.split(sep, 1)[0]
+    parts = ver.split(".")
+    got = []
+    for i in range(3):
+        n = 0
+        if i < len(parts):
+            digits = ""
+            for ch in parts[i]:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            n = int(digits) if digits else 0
+        got.append(n)
+    return tuple(got) >= tuple(minimum)
+
+
+# Lodor writes two sidecar record types into the save timeline; they are NOT game
+# saves and every save-shaped view here labels them instead of miscounting them.
+_LODOR_META_SUFFIXES = (".lodortime", ".lodorshot.png")
+
+
+def _is_lodor_meta(file_name: str) -> bool:
+    return any(file_name.endswith(sfx) for sfx in _LODOR_META_SUFFIXES)
+
+
 # ── Tools — Status & Stats ──────────────────────────────────────────────
 
 
@@ -353,7 +416,17 @@ async def romm_status() -> str:
             fs = data.get("FILESYSTEM", {})
 
             lines.append("  Connected: yes")
-            lines.append(f"  Version: {system.get('VERSION', '?')}")
+            ver = str(system.get("VERSION", "")).strip()
+            lines.append(f"  Version: {ver or '?'}")
+            if ver:
+                caps = []
+                caps.append("device_save_sync (>=4.9): "
+                            + ("yes" if _version_at_least(ver, (4, 9, 0)) else "no"))
+                caps.append("5.x API generation: "
+                            + ("yes" if _version_at_least(ver, (5, 0, 0)) else "no"))
+                lines.append("  Capabilities:")
+                for c in caps:
+                    lines.append(f"    - {c}")
             lines.append(f"  IGDB enabled: {meta.get('IGDB_API_ENABLED', False)}")
             lines.append(f"  ScreenScraper enabled: {meta.get('SS_API_ENABLED', False)}")
             lines.append(f"  HLTB enabled: {meta.get('HLTB_API_ENABLED', False)}")
@@ -1333,6 +1406,127 @@ async def romm_delete_collection(collection_id: int) -> str:
     """
     await _delete(f"collections/{collection_id}")
     return f"Deleted collection {collection_id}."
+
+
+# ── Tools — Lodor fleet (save timeline & states) ────────────────────────
+#
+# Read-only views over the device-sync data a Lodor fleet (or any RomM device
+# client) writes: per-revision content hashes, device attribution, and save
+# states. Same security posture as everything else here — nothing below can
+# modify or delete a save.
+
+
+@mcp.tool()
+async def romm_save_timeline(rom_id: int) -> str:
+    """Save revision timeline for one ROM — who pushed what, when, from which device.
+
+    Shows every save revision newest-first with content hash, size, emulator,
+    and per-device sync attribution (RomM device_save_sync, server 4.9+).
+    Flags broken records (0 bytes) and Lodor sidecar records (playtime /
+    preview), and warns when two devices currently hold different content —
+    the save-divergence signal.
+
+    rom_id: The ROM's ID (from romm_search / romm_library_items).
+    """
+    data = await _get("saves", params={"rom_id": rom_id})
+    if not isinstance(data, list) or not data:
+        return f"No saves on the server for ROM {rom_id}."
+
+    real: list[dict] = []
+    metas: list[dict] = []
+    ghosts = 0
+    for s in data:
+        name = s.get("file_name", "")
+        if _is_lodor_meta(name):
+            metas.append(s)
+        elif not s.get("file_size_bytes"):
+            ghosts += 1
+        else:
+            real.append(s)
+    real.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+
+    lines = [f"Save timeline for ROM {rom_id} — {len(real)} revision(s)"
+             + (f", {ghosts} broken (0-byte)" if ghosts else "")
+             + (f", {len(metas)} Lodor sidecar(s)" if metas else "") + ":\n"]
+
+    current_holders: dict = {}  # device_name -> content_hash of the revision it holds
+    for i, s in enumerate(real[:25]):
+        tag = "NEWEST" if i == 0 else f"-{i}"
+        chash = (s.get("content_hash") or "")[:12]
+        line = f"  [{tag}] {s.get('file_name', '?')} — {_fmt_size(s.get('file_size_bytes'))}"
+        if s.get("emulator"):
+            line += f" via {s['emulator']}"
+        lines.append(line)
+        lines.append(f"     Updated: {s.get('updated_at', '?')}"
+                     + (f"  hash: {chash}" if chash else "  hash: (none — pre-4.9 record)"))
+        for ds in s.get("device_syncs") or []:
+            mark = "HOLDS CURRENT" if ds.get("is_current") else "synced"
+            dname = ds.get("device_name") or ds.get("device_id", "?")
+            lines.append(f"     Device: {dname} — {mark} (last synced {ds.get('last_synced_at', '?')})")
+            if ds.get("is_current") and s.get("content_hash"):
+                current_holders[dname] = s["content_hash"]
+    if len(real) > 25:
+        lines.append(f"\n  ({len(real) - 25} older revisions not shown)")
+
+    distinct = set(current_holders.values())
+    if len(distinct) > 1:
+        lines.append("")
+        lines.append("  ⚠ DIVERGENCE: devices currently hold DIFFERENT save content:")
+        for dname, h in current_holders.items():
+            lines.append(f"     {dname}: {h[:12]}")
+        lines.append("     A sync from either device will surface this as a conflict —")
+        lines.append("     resolve by choosing a revision and restoring it on the other device.")
+
+    if metas:
+        lines.append("")
+        lines.append("  Lodor sidecars (not game saves — playtime/preview records):")
+        for m in metas[:6]:
+            lines.append(f"     {m.get('file_name', '?')} ({_fmt_size(m.get('file_size_bytes'))})")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_states(rom_id: int = 0, platform_id: int = 0) -> str:
+    """List save states (suspend/snapshot files) by ROM or platform.
+
+    Save STATES are emulator suspend points, distinct from save FILES (battery
+    saves) — see romm_saves for those.
+
+    rom_id: Filter to a specific ROM (0 = all).
+    platform_id: Filter to a specific platform (0 = all).
+    """
+    params: dict = {}
+    if rom_id:
+        params["rom_id"] = rom_id
+    if platform_id:
+        params["platform_id"] = platform_id
+
+    data = await _get("states", params=params)
+    if not isinstance(data, list) or not data:
+        qualifier = ""
+        if rom_id:
+            qualifier += f" for ROM {rom_id}"
+        if platform_id:
+            qualifier += f" on platform {platform_id}"
+        return f"No save states found{qualifier}."
+
+    lines = [f"Save states ({len(data)}):\n"]
+    for s in data[:50]:
+        line = f"  - {s.get('file_name', '?')}"
+        if s.get("rom_name"):
+            line += f" ({s['rom_name']})"
+        if s.get("emulator"):
+            line += f" via {s['emulator']}"
+        if s.get("file_size_bytes"):
+            line += f" — {_fmt_size(s['file_size_bytes'])}"
+        lines.append(line)
+        if s.get("updated_at"):
+            lines.append(f"    Updated: {s['updated_at']}")
+    if len(data) > 50:
+        lines.append(f"\n  ({len(data) - 50} more states not shown)")
+
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

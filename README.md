@@ -27,6 +27,8 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_devices` | List registered devices |
 | `romm_tasks` | Check running/scheduled task status |
 | `romm_scan_library` | Trigger a background library rescan |
+| `romm_save_timeline` | Per-ROM save revision timeline — device attribution, content hashes, divergence detection (server 4.9+) |
+| `romm_states` | List save states (suspend points) by ROM or platform |
 
 ### Write
 
