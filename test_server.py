@@ -367,3 +367,23 @@ def test_readonly_scopes_are_a_subset_without_writes():
     ro = set(server._READONLY_SCOPES.split())
     assert ro < full
     assert not any(s.endswith(".write") or s == "tasks.run" for s in ro)
+
+
+async def test_save_timeline_enriches_attribution_from_device_queries(calls):
+    # Plain listing has NO device_syncs (live 4.9.2 behavior); the tool must fetch
+    # devices and merge per-device enriched listings.
+    calls.responses.append([
+        {"id": 9, "file_name": "G.gba.sav", "file_size_bytes": 10,
+         "content_hash": "cafe", "updated_at": "2026-07-06T12:00:00Z"},
+    ])
+    calls.responses.append([{"id": "dev-1", "name": "Flip V2"}])  # devices
+    calls.responses.append([  # device-scoped enrichment
+        {"id": 9, "file_name": "G.gba.sav", "file_size_bytes": 10,
+         "content_hash": "cafe", "updated_at": "2026-07-06T12:00:00Z",
+         "device_syncs": [{"device_name": "Flip V2", "is_current": True,
+                           "last_synced_at": "2026-07-06T12:00:00Z"}]},
+    ])
+    out = await server.romm_save_timeline(rom_id=1)
+    assert calls[1]["path"] == "devices"
+    assert calls[2]["params"] == {"rom_id": 1, "device_id": "dev-1"}
+    assert "Flip V2" in out and "HOLDS CURRENT" in out

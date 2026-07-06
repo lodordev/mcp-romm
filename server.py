@@ -1485,6 +1485,27 @@ async def romm_save_timeline(rom_id: int) -> str:
     if not isinstance(data, list) or not data:
         return f"No saves on the server for ROM {rom_id}."
 
+    # Attribution enrichment: the PLAIN listing omits device_syncs (verified against
+    # a live RomM 4.9.2 — they only populate on device-scoped queries, the same way
+    # the Lodor engine asks). One extra query per registered device merges the full
+    # attribution picture; fleets are small, and any failure degrades to "no
+    # attribution shown", never an error.
+    syncs_by_save: dict = {}
+    try:
+        devices = await _get("devices")
+        if isinstance(devices, list):
+            for d in devices[:12]:
+                did = d.get("id")
+                if not did:
+                    continue
+                enriched = await _get("saves", params={"rom_id": rom_id, "device_id": did})
+                if isinstance(enriched, list):
+                    for es in enriched:
+                        for ds in es.get("device_syncs") or []:
+                            syncs_by_save.setdefault(es.get("id"), []).append(ds)
+    except Exception:
+        pass
+
     real: list[dict] = []
     metas: list[dict] = []
     ghosts = 0
@@ -1512,7 +1533,7 @@ async def romm_save_timeline(rom_id: int) -> str:
         lines.append(line)
         lines.append(f"     Updated: {s.get('updated_at', '?')}"
                      + (f"  hash: {chash}" if chash else "  hash: (none — pre-4.9 record)"))
-        for ds in s.get("device_syncs") or []:
+        for ds in (s.get("device_syncs") or []) + syncs_by_save.get(s.get("id"), []):
             mark = "HOLDS CURRENT" if ds.get("is_current") else "synced"
             dname = ds.get("device_name") or ds.get("device_id", "?")
             lines.append(f"     Device: {dname} — {mark} (last synced {ds.get('last_synced_at', '?')})")
