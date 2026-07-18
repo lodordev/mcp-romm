@@ -29,6 +29,14 @@ grant survive 5.0 unchanged; this release fixes the response-schema drift.
 - `romm_search_by_hash` accepts `ra_hash` (RetroAchievements hash, RomM 5.0+).
 - `romm_library_items` and `romm_search` report the library-wide `total` match
   count, not just the page size.
+- `romm_tasks` now also lists the task registry (RomM 5.0's `GET /api/tasks`):
+  each task's schedule, enabled state, and whether it can be run manually.
+- `romm_scan_library` explains RomM 5.0's refusal of manually triggered scans
+  (`scan_library` is `manual_run: false` there) instead of surfacing a raw 400.
+- `smoke_test.py` is now a full live e2e suite: all 28 tools against a real
+  instance, with self-cleaning write fixtures and a `ROMM_SMOKE_SKIP` knob for
+  endpoints that are broken server-side. Running it against RomM 5.0.0 found
+  three server-side bugs, documented in the README's Known issues section.
 
 ### Changed
 

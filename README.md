@@ -25,8 +25,8 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_rom_notes` | View notes on a ROM |
 | `romm_firmware` | List BIOS/firmware files per platform |
 | `romm_devices` | List registered devices |
-| `romm_tasks` | Check running/scheduled task status |
-| `romm_scan_library` | Trigger a background library rescan |
+| `romm_tasks` | List registered tasks (schedule, manual-run availability) and running status |
+| `romm_scan_library` | Trigger a background library rescan (blocked over REST on RomM 5.0 — see Known issues) |
 
 ### Write
 
@@ -161,12 +161,24 @@ The server uses OAuth2 password grant to authenticate with RomM. Tokens are scop
 
 ## Known issues
 
-- **RomM 5.0.0: `romm_filters` times out.** `GET /api/roms/filters` in RomM
-  5.0.0 executes a query with a cartesian product (RomM's log flags it at
+All three are RomM 5.0.0 server-side issues, found by running this server's
+live e2e suite (`smoke_test.py`) against a 5.0.0 instance:
+
+- **`romm_filters` times out.** `GET /api/roms/filters` in RomM 5.0.0 executes
+  a query with a cartesian product (RomM's log flags it at
   `roms_handler.py:2159`); the request hangs until the client timeout, and the
   abandoned query keeps running server-side at high CPU. Avoid calling
   `romm_filters` on 5.0.0 until this is fixed upstream — every call strands
   another runaway database query.
+- **Note listing 500s once any note exists.** RomM 5.0.0's
+  `GET /api/roms/{id}/notes` fails serialization (`UserNoteSchema` validation
+  in `endpoints/roms/notes.py`) whenever the ROM has at least one note.
+  Creating and deleting notes work; `romm_rom_notes` (and the read-back after
+  `romm_add_note`) will error until fixed upstream.
+- **Library scans can't be triggered over REST.** RomM 5.0.0 flags
+  `scan_library` as `manual_run: false`, so `POST /api/tasks/run/scan_library`
+  is rejected. `romm_scan_library` reports this instead of failing; scans run
+  on the configured schedule or from the web UI.
 
 ## License
 

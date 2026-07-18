@@ -1086,14 +1086,36 @@ async def romm_devices() -> str:
 
 @mcp.tool()
 async def romm_tasks() -> str:
-    """Check running and scheduled task status."""
+    """List registered tasks (schedule, manual-run availability) and running task status."""
+    lines: list[str] = []
+
+    # Task registry — RomM 5.0+ (GET /api/tasks); 4.x doesn't have it.
+    try:
+        registry = await _get("tasks")
+    except RuntimeError:
+        registry = None
+    if isinstance(registry, dict) and registry:
+        lines.append("Registered tasks:")
+        for group, tasks in registry.items():
+            if not isinstance(tasks, list) or not tasks:
+                continue
+            lines.append(f"  [{group}]")
+            for t in tasks:
+                if not isinstance(t, dict):
+                    continue
+                name = t.get("name", "?")
+                line = f"    {name} — {'enabled' if t.get('enabled') else 'disabled'}"
+                if t.get("cron_string"):
+                    line += f", cron {t['cron_string']}"
+                line += (", manual run allowed" if t.get("manual_run")
+                         else ", manual run not allowed")
+                lines.append(line)
+        lines.append("")
+
     data = await _get("tasks/status")
 
-    if not isinstance(data, (dict, list)):
-        return "No task data available."
-
-    if isinstance(data, dict):
-        lines = ["Task Status:\n"]
+    if isinstance(data, dict) and data:
+        lines.append("Task status:")
         for task_name, info in data.items():
             if isinstance(info, dict):
                 status = info.get("status", "unknown")
@@ -1107,10 +1129,8 @@ async def romm_tasks() -> str:
                 lines.append(line)
             else:
                 lines.append(f"  {task_name}: {info}")
-        return "\n".join(lines)
-
-    if isinstance(data, list):
-        lines = [f"Tasks ({len(data)}):\n"]
+    elif isinstance(data, list) and data:
+        lines.append(f"Running/queued tasks ({len(data)}):")
         for t in data:
             if isinstance(t, dict):
                 name = t.get("name", t.get("task_name", "Unknown"))
@@ -1118,9 +1138,12 @@ async def romm_tasks() -> str:
                 lines.append(f"  - {name}: {status}")
             else:
                 lines.append(f"  - {t}")
-        return "\n".join(lines)
+    elif not lines:
+        return "No task data available."
+    else:
+        lines.append("No tasks currently running.")
 
-    return "Unexpected task data format."
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1129,16 +1152,27 @@ async def romm_scan_library() -> str:
 
     This is a background task — it returns immediately. New ROMs will appear
     in the library as the scan progresses.
+
+    Note: RomM 5.0 marks scan_library as not manually runnable via the REST
+    tasks API — on 5.0 instances this tool reports that instead of scanning.
     """
     try:
         data = await _post("tasks/run/scan_library", long_timeout=True)
         if isinstance(data, dict):
-            job_id = data.get("id", "")
+            job_id = data.get("task_id") or data.get("id", "")
             status = data.get("status", "started")
             return f"Library scan triggered (job: {job_id}, status: {status})."
         return "Library scan triggered."
     except RuntimeError as e:
-        if "422" in str(e) or "not enabled" in str(e).lower():
+        msg = str(e)
+        if "cannot be run" in msg:
+            return (
+                "RomM refuses manually triggered library scans (scan_library is "
+                "flagged manual_run=false on RomM 5.0). The library rescans on its "
+                "configured schedule — check romm_tasks for the cron — or scan from "
+                "the RomM web UI."
+            )
+        if "422" in msg or "not enabled" in msg.lower():
             return "Library scan task is not enabled in RomM settings. Enable scheduled rescan first."
         raise
 

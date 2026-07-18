@@ -18,6 +18,7 @@ Run: python smoke_test.py
 
 import asyncio
 import os
+import re
 import sys
 import time
 
@@ -232,19 +233,31 @@ async def test_favorite(rom_a: int) -> None:
 
 
 async def test_notes(rom_a: int) -> None:
+    # The note id comes from romm_add_note's own output, NOT from re-listing:
+    # RomM 5.0.0's note-list endpoint 500s once any note exists, and cleanup
+    # must not depend on a broken read path.
     note_id = None
     try:
         out = await server.romm_add_note(rom_a, title="mcp-e2e note",
                                          content="throwaway", tags=["e2e"])
         check("romm_add_note", "note id:" in out, out)
-        notes = await server._get(f"roms/{rom_a}/notes")
-        if isinstance(notes, list):
-            note_id = next((n.get("id") for n in notes
-                            if n.get("title") == "mcp-e2e note"), None)
-        check("romm_rom_notes shows new note", note_id is not None, str(notes)[:200])
+        m = re.search(r"note id: (\d+)", out)
+        note_id = int(m.group(1)) if m else None
+        try:
+            notes = await server._get(f"roms/{rom_a}/notes")
+            listed = isinstance(notes, list) and any(
+                n.get("id") == note_id for n in notes)
+            check("romm_rom_notes shows new note", listed, str(notes)[:200])
+        except Exception as e:
+            check("romm_rom_notes shows new note", False,
+                  f"raised: {e} (known RomM 5.0.0 note-list serialization bug)")
         if note_id is not None:
-            out = await server.romm_update_note(rom_a, note_id, content="updated body")
-            check("romm_update_note", "Updated note" in out, out)
+            try:
+                out = await server.romm_update_note(rom_a, note_id,
+                                                    content="updated body")
+                check("romm_update_note", "Updated note" in out, out)
+            except Exception as e:
+                check("romm_update_note", False, f"raised: {e}")
     except Exception as e:
         check("romm notes flow", False, f"raised: {e}")
     finally:
@@ -252,10 +265,6 @@ async def test_notes(rom_a: int) -> None:
             try:
                 out = await server.romm_delete_note(rom_a, note_id)
                 check("romm_delete_note", "Deleted note" in out, out)
-                notes = await server._get(f"roms/{rom_a}/notes")
-                gone = not any(n.get("id") == note_id for n in notes) \
-                    if isinstance(notes, list) else True
-                check("note cleanup verified", gone, str(notes)[:200])
             except Exception as e:
                 check("romm_delete_note", False, f"raised: {e}")
 
@@ -300,10 +309,13 @@ async def write_tools(ctx: dict) -> None:
     await test_notes(ctx["rom_a"])
     await test_collections(ctx["rom_a"], ctx["rom_b"])
 
-    # scan_library: real trigger, background, same as the nightly cron.
+    # scan_library: real trigger where allowed; RomM 5.0 refuses manual scans
+    # over REST, and the tool reporting that refusal IS correct behavior.
     out = await tool_out("romm_scan_library", server.romm_scan_library())
     if out is not None:
-        check("romm_scan_library", "triggered" in out or "not enabled" in out, out)
+        check("romm_scan_library",
+              any(s in out for s in ("triggered", "not enabled",
+                                     "refuses manually triggered")), out)
 
 
 async def main() -> int:

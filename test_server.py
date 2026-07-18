@@ -200,6 +200,30 @@ async def test_delete_note(calls):
     assert "Deleted note 11" in out
 
 
+# ── tasks & scan ─────────────────────────────────────────────────────────────
+
+
+async def test_tasks_lists_registry_and_status(calls):
+    calls.responses.append({"scheduled": [
+        {"name": "scan_library", "enabled": True, "manual_run": False,
+         "cron_string": "0 3 * * *"}]})
+    calls.responses.append([])
+    out = await server.romm_tasks()
+    assert "scan_library" in out
+    assert "cron 0 3 * * *" in out
+    assert "manual run not allowed" in out
+    assert "No tasks currently running" in out
+
+
+async def test_scan_library_manual_run_blocked(monkeypatch):
+    async def raise_400(*a, **kw):
+        raise RuntimeError(
+            "API error 400: {\"detail\":\"Task 'scan_library' cannot be run\"}")
+    monkeypatch.setattr(server, "_request", raise_400)
+    out = await server.romm_scan_library()
+    assert "refuses manually triggered" in out
+
+
 # ── romm_get_item favorite detection ────────────────────────────────────────
 
 
