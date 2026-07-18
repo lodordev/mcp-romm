@@ -1813,8 +1813,12 @@ async def romm_whoami() -> str:
         names = []
         for g in grants:
             if isinstance(g, dict):
-                names.append(str(g.get("permission") or g.get("name")
-                                 or g.get("key") or g))
+                label = str(g.get("action") or g.get("permission")
+                            or g.get("name") or g.get("key") or g)
+                scope = g.get("scope")
+                if isinstance(scope, dict) and scope.get("kind") not in (None, "global"):
+                    label += f" ({scope['kind']} {scope.get('id')})"
+                names.append(label)
             else:
                 names.append(str(g))
         if names:

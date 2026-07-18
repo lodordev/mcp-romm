@@ -290,10 +290,11 @@ async def test_whoami_handles_object_grants(calls):
     # Live RomM 5.0 returns grants as a list of objects — must not sort dicts.
     calls.responses.append({"id": 1, "username": "romm"})
     calls.responses.append({"is_admin": False, "grants": [
-        {"permission": "roms.read"}, {"permission": "collections.write"}],
+        {"action": "rom.view", "scope": {"kind": "global", "id": None}},
+        {"action": "collection.edit", "scope": {"kind": "collection", "id": 4}}],
         "hidden": []})
     out = await server.romm_whoami()
-    assert "collections.write, roms.read" in out
+    assert "collection.edit (collection 4), rom.view" in out
     assert "Grants (2)" in out
 
 
