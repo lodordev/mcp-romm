@@ -200,7 +200,76 @@ async def test_delete_note(calls):
     assert "Deleted note 11" in out
 
 
+# ── romm_get_item favorite detection ────────────────────────────────────────
+
+
+async def test_get_item_favorite_via_collection_membership_on_50(calls):
+    # 5.0: rom_user has no is_favorite, and user_collections embeds
+    # is_favorite as null — favorite-ness comes from id-matching the
+    # favorites collection.
+    calls.responses.append({
+        "id": 14376, "name": "Super Metroid", "rom_user": {"status": None},
+        "user_collections": [{"id": 10, "name": "Favorites", "is_favorite": None}],
+    })
+    calls.responses.append([{"id": 10, "name": "Favorites", "is_favorite": True}])
+    out = await server.romm_get_item(14376)
+    assert calls[1]["path"] == "collections"
+    assert "Favorite: yes" in out
+
+
+async def test_get_item_not_favorite_when_not_member(calls):
+    calls.responses.append({
+        "id": 5, "name": "Beyond Oasis", "rom_user": {},
+        "user_collections": [{"id": 9, "name": "Action RPG", "is_favorite": None}],
+    })
+    calls.responses.append([{"id": 10, "name": "Favorites", "is_favorite": True}])
+    out = await server.romm_get_item(5)
+    assert "Favorite: yes" not in out
+
+
+async def test_get_item_favorite_legacy_4x_field_skips_lookup(calls):
+    calls.responses.append({
+        "id": 5, "name": "Chrono Trigger",
+        "rom_user": {"is_favorite": True},
+    })
+    out = await server.romm_get_item(5)
+    assert len(calls) == 1  # no collections lookup needed
+    assert "Favorite: yes" in out
+
+
 # ── collections ──────────────────────────────────────────────────────────────
+
+
+async def test_collections_uses_rom_count_on_50(calls):
+    calls.responses.append([{"id": 1, "name": "RPGs", "rom_count": 12}])
+    out = await server.romm_collections()
+    assert "RPGs (12 ROMs)" in out
+
+
+async def test_collections_falls_back_to_embedded_roms_on_4x(calls):
+    calls.responses.append([{"id": 1, "name": "RPGs", "roms": [{}, {}]}])
+    out = await server.romm_collections()
+    assert "RPGs (2 ROMs)" in out
+
+
+async def test_collection_detail_fetches_members_on_50(calls):
+    # 5.0: detail has rom_count/rom_ids but no embedded roms list.
+    calls.responses.append({"id": 4, "name": "RPGs", "rom_count": 2, "rom_ids": [1, 2]})
+    calls.responses.append({"items": [{"name": "Chrono Trigger", "platform_slug": "snes"},
+                                      {"name": "Earthbound"}], "total": 2})
+    out = await server.romm_collection_detail(4)
+    assert calls[1]["path"] == "roms"
+    assert calls[1]["params"]["collection_id"] == 4
+    assert "ROMs: 2" in out
+    assert "Chrono Trigger" in out
+
+
+async def test_collection_detail_uses_embedded_roms_on_4x(calls):
+    calls.responses.append({"id": 4, "name": "RPGs",
+                            "roms": [{"name": "Chrono Trigger"}]})
+    out = await server.romm_collection_detail(4)
+    assert len(calls) == 1  # no second fetch needed
+    assert "Chrono Trigger" in out
 
 
 async def test_create_collection_uses_form_data(calls):

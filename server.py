@@ -3,7 +3,7 @@
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
 Provides 28 tools: 19 read-only for browsing, searching, and viewing metadata,
 plus 9 write tools for setting play status, favoriting, notes, and managing
-collections.
+collections. Targets RomM 5.0+; most read tools degrade gracefully on 4.4+.
 
 Write tools change only your own user data (play status, favorites, notes) and
 your own collections. No tool modifies ROM files, platforms, firmware, other
@@ -17,7 +17,7 @@ Tools:
   romm_recent              — Recently added or updated ROMs
   romm_get_item            — Full ROM detail (metadata, saves, user status)
   romm_search              — Search ROMs by name
-  romm_search_by_hash      — Identify a ROM by file hash (MD5, SHA1, SHA256, or CRC)
+  romm_search_by_hash      — Identify a ROM by file hash (MD5, SHA1, CRC, or RetroAchievements)
   romm_stats               — Library-wide statistics
   romm_collections         — List user-curated collections
   romm_collection_detail   — List ROMs in a specific collection
@@ -460,8 +460,10 @@ async def romm_library_items(
     data = await _get("roms", params=params, long_timeout=True)
 
     items = []
+    total = None
     if isinstance(data, dict):
         items = data.get("items", [])
+        total = data.get("total")
     elif isinstance(data, list):
         items = data
 
@@ -470,8 +472,10 @@ async def romm_library_items(
         qualifier += f" on platform {platform_id}" if platform_id else ""
         return f"No ROMs found{qualifier}."
 
-    total = len(items)
-    lines = [f"ROMs (offset {offset}, showing {total}):\n"]
+    if total is not None:
+        lines = [f"ROMs (offset {offset}, showing {len(items)} of {total}):\n"]
+    else:
+        lines = [f"ROMs (offset {offset}, showing {len(items)}):\n"]
     for i, rom in enumerate(items, 1):
         lines.extend(_fmt_rom_line(rom, index=i + offset))
 
@@ -541,10 +545,30 @@ async def romm_get_item(rom_id: int) -> str:
     alt_names = data.get("alternative_names", [])
 
     user = data.get("rom_user", {}) or {}
-    is_fav = user.get("is_favorite", False) if isinstance(user, dict) else False
     last_played = user.get("last_played") if isinstance(user, dict) else None
     status = user.get("status") if isinstance(user, dict) else None
+
+    # Favorite flag: 5.0 dropped rom_user.is_favorite — favorites are a special
+    # collection. The is_favorite field embedded in user_collections serializes
+    # as null even for the favorites collection (verified on 5.0.0), so resolve
+    # the flagged collection and match by id. 4.x still sets rom_user.is_favorite.
+    is_fav = user.get("is_favorite", False) if isinstance(user, dict) else False
+    user_collections = data.get("user_collections", [])
+    if not is_fav and isinstance(user_collections, list) and user_collections:
+        try:
+            fav = await _favorite_collection()
+        except RuntimeError:
+            fav = None
+        if fav:
+            is_fav = any(
+                isinstance(c, dict) and c.get("id") == fav.get("id")
+                for c in user_collections
+            )
+
+    # Inline note: 4.x kept a single note on rom_user; 5.0 moved notes to the
+    # /notes endpoints and only flags has_notes here.
     note_raw = user.get("note_raw_markdown") if isinstance(user, dict) else None
+    has_notes = bool(data.get("has_notes"))
 
     saves = data.get("user_saves", [])
     states = data.get("user_states", [])
@@ -572,6 +596,8 @@ async def romm_get_item(rom_id: int) -> str:
         lines.append(f"  Last played: {last_played}")
     if note_raw:
         lines.append(f"  Note: {note_raw[:200]}")
+    elif has_notes:
+        lines.append("  Notes: yes (view with romm_rom_notes)")
 
     if saves:
         lines.append(f"\n  Saves ({len(saves)}):")
@@ -619,15 +645,18 @@ async def romm_search(query: str, platform_id: int = 0, limit: int = 20) -> str:
     data = await _get("roms", params=params, long_timeout=True)
 
     items = []
+    total = None
     if isinstance(data, dict):
         items = data.get("items", [])
+        total = data.get("total")
     elif isinstance(data, list):
         items = data
 
     if not items:
         return f"No ROMs found matching \"{query}\"."
 
-    lines = [f"Search results for \"{query}\" ({len(items)} found):\n"]
+    found = total if total is not None else len(items)
+    lines = [f"Search results for \"{query}\" ({found} found, showing {len(items)}):\n"]
     for i, rom in enumerate(items, 1):
         name = rom.get("name", "Unknown")
         platform = rom.get("platform_display_name") or rom.get("platform_slug", "?")
@@ -648,12 +677,14 @@ async def romm_search_by_hash(
     crc_hash: str = "",
     md5_hash: str = "",
     sha1_hash: str = "",
+    ra_hash: str = "",
 ) -> str:
     """Identify a ROM by file hash. Provide at least one hash value.
 
     crc_hash: CRC32 hash string.
     md5_hash: MD5 hash string.
     sha1_hash: SHA1 hash string.
+    ra_hash: RetroAchievements hash string (RomM 5.0+).
     """
     params: dict = {}
     if crc_hash:
@@ -662,9 +693,11 @@ async def romm_search_by_hash(
         params["md5_hash"] = md5_hash.strip()
     if sha1_hash:
         params["sha1_hash"] = sha1_hash.strip()
+    if ra_hash:
+        params["ra_hash"] = ra_hash.strip()
 
     if not params:
-        return "At least one hash value is required (crc_hash, md5_hash, or sha1_hash)."
+        return "At least one hash value is required (crc_hash, md5_hash, sha1_hash, or ra_hash)."
 
     data = await _get("roms/by-hash", params=params)
 
@@ -726,8 +759,11 @@ async def romm_collections() -> str:
         name = c.get("name", "Unknown")
         desc = c.get("description", "")
         cid = c.get("id", "?")
-        roms = c.get("roms", [])
-        rom_count = len(roms) if isinstance(roms, list) else 0
+        # RomM 5.0 returns rom_count; 4.x embedded the full roms list.
+        rom_count = c.get("rom_count")
+        if rom_count is None:
+            roms = c.get("roms", [])
+            rom_count = len(roms) if isinstance(roms, list) else 0
 
         lines.append(f"  {name} ({rom_count} ROM{'s' if rom_count != 1 else ''})")
         if desc:
@@ -754,12 +790,30 @@ async def romm_collection_detail(collection_id: int) -> str:
 
     name = data.get("name", "Unknown")
     desc = data.get("description", "")
-    roms = data.get("roms", [])
+
+    # RomM 5.0 no longer embeds the roms list in the collection — fetch the
+    # members via the roms endpoint's collection_id filter. 4.x embedded them.
+    roms = data.get("roms")
+    rom_count = data.get("rom_count")
+    if not isinstance(roms, list) or not roms:
+        members = await _get(
+            "roms",
+            params={"collection_id": collection_id, "limit": 50, "offset": 0,
+                    "order_by": "name", "order_dir": "asc"},
+            long_timeout=True,
+        )
+        if isinstance(members, dict):
+            roms = members.get("items", [])
+            rom_count = members.get("total", rom_count)
+        elif isinstance(members, list):
+            roms = members
+    if rom_count is None:
+        rom_count = len(roms) if isinstance(roms, list) else 0
 
     lines = [f"{name}"]
     if desc:
         lines.append(f"  {desc[:200]}")
-    lines.append(f"  ROMs: {len(roms)}\n")
+    lines.append(f"  ROMs: {rom_count}\n")
 
     if isinstance(roms, list):
         for i, rom in enumerate(roms[:50], 1):
@@ -773,8 +827,8 @@ async def romm_collection_detail(collection_id: int) -> str:
             else:
                 lines.append(f"  {i}. ROM ID: {rom}")
 
-        if len(roms) > 50:
-            lines.append(f"\n  ({len(roms) - 50} more not shown)")
+        if rom_count > 50:
+            lines.append(f"\n  ({rom_count - 50} more not shown)")
 
     return "\n".join(lines)
 
@@ -835,15 +889,25 @@ async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
     for s in data[:50]:
         fname = s.get("file_name", "?")
         size = s.get("file_size_bytes", 0)
+        # rom_name/platform_slug are 4.x-only; 5.0 saves carry rom_id + emulator/slot.
         rom_name = s.get("rom_name", "")
         platform = s.get("platform_slug", "")
+        emulator = s.get("emulator", "")
+        slot = s.get("slot")
+        srom_id = s.get("rom_id")
         updated = s.get("updated_at", "")
 
         line = f"  - {fname}"
         if rom_name:
             line += f" ({rom_name})"
+        elif srom_id:
+            line += f" (ROM {srom_id})"
         if platform:
             line += f" [{platform}]"
+        if emulator:
+            line += f" [{emulator}]"
+        if slot not in (None, ""):
+            line += f" slot {slot}"
         if size:
             line += f" — {_fmt_size(size)}"
         lines.append(line)
@@ -994,14 +1058,24 @@ async def romm_devices() -> str:
 
     lines = [f"Devices ({len(data)}):\n"]
     for d in data:
-        name = d.get("name", "Unknown")
+        name = d.get("name") or d.get("hostname", "Unknown")
+        # 4.x had a free-form "type"; 5.0 devices carry client/platform/sync info.
         device_type = d.get("type", "")
+        client = d.get("client", "")
+        platform = d.get("platform", "")
+        last_seen = d.get("last_seen", "")
+        sync_enabled = d.get("sync_enabled")
         device_id = d.get("id", "?")
 
         line = f"  - {name}"
-        if device_type:
-            line += f" ({device_type})"
+        detail = device_type or " / ".join(x for x in (client, platform) if x)
+        if detail:
+            line += f" ({detail})"
+        if sync_enabled is not None:
+            line += f" — sync {'on' if sync_enabled else 'off'}"
         lines.append(line)
+        if last_seen:
+            lines.append(f"    Last seen: {last_seen}")
         lines.append(f"    ID: {device_id}")
 
     return "\n".join(lines)

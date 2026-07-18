@@ -15,7 +15,7 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_recent` | Recently added or updated ROMs |
 | `romm_get_item` | Full ROM detail — metadata, saves, user status |
 | `romm_search` | Search ROMs by name |
-| `romm_search_by_hash` | Identify a ROM by file hash (CRC, MD5, or SHA1) |
+| `romm_search_by_hash` | Identify a ROM by file hash (CRC, MD5, SHA1, or RetroAchievements) |
 | `romm_filters` | Available filter values (genres, regions, languages, tags) |
 | `romm_collections` | List user-curated collections |
 | `romm_collection_detail` | List ROMs in a specific collection |
@@ -49,8 +49,8 @@ These modify **your own** user data and collections. They cannot alter ROM files
 ### Prerequisites
 
 - Python 3.10+
-- A running [RomM](https://github.com/rommapp/romm) instance (v4.0+)
-- A RomM user account with admin role
+- A running [RomM](https://github.com/rommapp/romm) instance (v5.0+; most read tools also work on v4.4+)
+- An **enabled** RomM user account — admin is not required (see [Auth](#auth))
 
 ### Install
 
@@ -156,6 +156,8 @@ And, with the write tools:
 The server uses OAuth2 password grant to authenticate with RomM. Tokens are scoped to the minimum permissions needed and automatically refreshed when they expire. If a request gets a 401, the server re-authenticates and retries once.
 
 **Note:** The read and write tools operate on your own library and user data, so an ordinary **enabled** RomM user account is sufficient — admin is not required. (`romm_scan_library` does require an account permitted to run tasks.)
+
+**RomM 5.0 role change:** RomM 5.0 collapsed the old `viewer`/`editor`/`admin` roles into `user`/`admin` and moved fine-grained authorization to a permissions system (legacy roles are coerced to `user` on upgrade). If a tool unexpectedly gets a 403 on a 5.0 instance, check the account's effective permissions (`GET /api/permissions/me`) in the RomM admin UI.
 
 ## License
 
