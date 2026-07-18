@@ -1808,13 +1808,23 @@ async def romm_whoami() -> str:
         grants = perms.get("grants") or []
         if isinstance(grants, dict):
             grants = [k for k, v in grants.items() if v]
-        if grants:
-            shown = ", ".join(str(g) for g in sorted(grants)[:25])
-            if len(grants) > 25:
-                shown += f" (+{len(grants) - 25} more)"
-            lines.append(f"  Grants ({len(grants)}): {shown}")
-        hidden = perms.get("hidden") or []
-        if hidden:
+        # Live 5.0 returns grants as a list of objects, not strings — pull a
+        # readable name from each rather than assuming they sort.
+        names = []
+        for g in grants:
+            if isinstance(g, dict):
+                names.append(str(g.get("permission") or g.get("name")
+                                 or g.get("key") or g))
+            else:
+                names.append(str(g))
+        if names:
+            names.sort()
+            shown = ", ".join(names[:25])
+            if len(names) > 25:
+                shown += f" (+{len(names) - 25} more)"
+            lines.append(f"  Grants ({len(names)}): {shown}")
+        hidden = perms.get("hidden")
+        if isinstance(hidden, (list, dict)) and hidden:
             lines.append(f"  Hidden items: {len(hidden)}")
 
     return "\n".join(lines) if lines else "Could not read account info."

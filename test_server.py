@@ -286,6 +286,17 @@ async def test_whoami_formats_identity_and_grants(calls):
     assert "Admin: yes" in out
 
 
+async def test_whoami_handles_object_grants(calls):
+    # Live RomM 5.0 returns grants as a list of objects — must not sort dicts.
+    calls.responses.append({"id": 1, "username": "romm"})
+    calls.responses.append({"is_admin": False, "grants": [
+        {"permission": "roms.read"}, {"permission": "collections.write"}],
+        "hidden": []})
+    out = await server.romm_whoami()
+    assert "collections.write, roms.read" in out
+    assert "Grants (2)" in out
+
+
 async def test_metadata_search_params(calls):
     calls.responses.append([{"name": "Super Mario 64", "slug": "sm64",
                              "igdb_id": 1074, "moby_id": None}])
