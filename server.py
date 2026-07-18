@@ -62,6 +62,10 @@ Environment variables:
   ROMM_REQUEST_TIMEOUT  — Default request timeout in seconds (default: 30)
   ROMM_REQUEST_TIMEOUT_LONG — Timeout for slow endpoints (default: 60)
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
+  ROMM_MCP_TRANSPORT    — MCP transport: "stdio" (default) or "http" to serve
+                          remote clients over Streamable HTTP
+  ROMM_MCP_HOST         — Bind address for http transport (default: 127.0.0.1)
+  ROMM_MCP_PORT         — Port for http transport (default: 8765)
 
 Security:
   - Least privilege: the OAuth2 token requests only read scopes plus
@@ -1874,5 +1878,25 @@ async def romm_metadata_search(rom_id: int, search_term: str = "",
     return "\n".join(lines)
 
 
+def _transport_config() -> tuple[str, dict]:
+    """Resolve mcp.run() transport from env.
+
+    Default is stdio (client spawns this process). "http" serves the MCP over
+    Streamable HTTP for remote clients; the value is passed to FastMCP
+    verbatim, so any transport name your FastMCP version supports works.
+    """
+    transport = os.getenv("ROMM_MCP_TRANSPORT", "stdio").strip().lower()
+    if transport in ("", "stdio"):
+        return "stdio", {}
+    return transport, {
+        "host": os.getenv("ROMM_MCP_HOST", "127.0.0.1"),
+        "port": int(os.getenv("ROMM_MCP_PORT", "8765")),
+    }
+
+
 if __name__ == "__main__":
-    mcp.run()
+    _transport, _kwargs = _transport_config()
+    if _transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(transport=_transport, **_kwargs)

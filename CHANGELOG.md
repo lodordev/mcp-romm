@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1
+
+### Added
+
+- Optional HTTP transport for remote MCP clients: set `ROMM_MCP_TRANSPORT=http`
+  (with `ROMM_MCP_HOST`/`ROMM_MCP_PORT`, default `127.0.0.1:8765`) to serve the
+  MCP over Streamable HTTP instead of stdio — e.g. one shared instance on a
+  homelab reachable from every machine. No auth of its own: bind to trusted
+  networks only. Dockerfile documents the pattern and exposes 8765.
+
 ## 1.2.0
 
 Full RomM 5.0 feature coverage — 12 new tools (40 total), all within the

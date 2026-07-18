@@ -201,6 +201,22 @@ async def test_delete_note(calls):
     assert "Deleted note 11" in out
 
 
+# ── transport selection ──────────────────────────────────────────────────────
+
+
+def test_transport_defaults_to_stdio(monkeypatch):
+    monkeypatch.delenv("ROMM_MCP_TRANSPORT", raising=False)
+    assert server._transport_config() == ("stdio", {})
+
+
+def test_transport_http_reads_host_port(monkeypatch):
+    monkeypatch.setenv("ROMM_MCP_TRANSPORT", "HTTP")
+    monkeypatch.setenv("ROMM_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("ROMM_MCP_PORT", "9000")
+    assert server._transport_config() == (
+        "http", {"host": "0.0.0.0", "port": 9000})
+
+
 # ── play sessions, smart/virtual collections, identity (v1.2) ────────────────
 
 

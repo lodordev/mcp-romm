@@ -90,6 +90,9 @@ Set environment variables:
 | `ROMM_REQUEST_TIMEOUT` | No | `30` | Default request timeout (seconds) |
 | `ROMM_REQUEST_TIMEOUT_LONG` | No | `60` | Timeout for slow endpoints |
 | `ROMM_TLS_VERIFY` | No | `true` | Verify TLS certificates |
+| `ROMM_MCP_TRANSPORT` | No | `stdio` | `stdio` (client spawns the process) or `http` (serve remote MCP clients) |
+| `ROMM_MCP_HOST` | No | `127.0.0.1` | Bind address for `http` transport |
+| `ROMM_MCP_PORT` | No | `8765` | Port for `http` transport |
 
 ### Add to Claude Code
 
@@ -130,6 +133,27 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   }
 }
 ```
+
+### Remote (HTTP) transport
+
+By default the server speaks stdio and is spawned by the client. To host it as
+a shared network service instead — e.g. one instance on your homelab that all
+your machines use — set:
+
+```bash
+ROMM_MCP_TRANSPORT=http ROMM_MCP_HOST=0.0.0.0 ROMM_MCP_PORT=8765 python server.py
+```
+
+Then point clients at it, e.g. Claude Code:
+
+```bash
+claude mcp add --transport http romm http://your-host:8765/mcp
+```
+
+The HTTP transport has no authentication of its own — bind it to a trusted
+network only (LAN, VPN, or an overlay network like Tailscale), never the open
+internet. Note that claude.ai web/mobile connectors connect from Anthropic's
+cloud and cannot reach private-network URLs.
 
 ## Examples
 
