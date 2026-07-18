@@ -1,6 +1,6 @@
 # RomM MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 28 tools: 19 read-only for browsing platforms, searching ROMs, viewing metadata, collections, saves, and tasks — plus 9 write tools for setting play status, favoriting, notes, and managing collections, through any MCP-compatible AI assistant.
+An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 40 tools: 26 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, play activity, and tasks — plus 14 write tools for play status, play sessions, favorites, notes, and collection management, through any MCP-compatible AI assistant.
 
 ## Tools
 
@@ -27,6 +27,13 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_devices` | List registered devices |
 | `romm_tasks` | List registered tasks (schedule, manual-run availability) and running status |
 | `romm_scan_library` | Trigger a background library rescan (blocked over REST on RomM 5.0 — see Known issues) |
+| `romm_activity` | Recent play activity feed — who played what, when (5.0+) |
+| `romm_play_sessions` | List recorded play sessions with durations (5.0+) |
+| `romm_virtual_collections` | Automatic groupings by genre/franchise/company/etc. (5.0+) |
+| `romm_virtual_collection_detail` | List ROMs in a virtual collection (5.0+) |
+| `romm_smart_collection_detail` | A smart collection's rules and matching ROMs (5.0+) |
+| `romm_whoami` | Authenticated account, role, and effective permissions |
+| `romm_metadata_search` | Search metadata providers (IGDB etc.) for ROM matches (5.0+) |
 
 ### Write
 
@@ -43,6 +50,11 @@ These modify **your own** user data and collections. They cannot alter ROM files
 | `romm_add_to_collection` | Add ROMs to a collection |
 | `romm_remove_from_collection` | Remove ROMs from a collection |
 | `romm_delete_collection` | Delete a collection — the grouping only, not the ROMs (permanent) |
+| `romm_log_play_session` | Record a play session on a ROM (5.0+) |
+| `romm_delete_play_session` | Delete one of your play sessions (permanent, 5.0+) |
+| `romm_create_smart_collection` | Create a smart collection — a saved filter that auto-matches ROMs (5.0+) |
+| `romm_update_smart_collection` | Edit a smart collection's name/description/rules (5.0+) |
+| `romm_delete_smart_collection` | Delete a smart collection — the saved filter only (permanent, 5.0+) |
 
 ## Setup
 

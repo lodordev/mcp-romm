@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.0
+
+Full RomM 5.0 feature coverage — 12 new tools (40 total), all within the
+existing OAuth scope set (no new permissions requested) and the same security
+boundary: your own user data and collections only.
+
+### Added
+
+- **Play tracking (RomM 5.0+):** `romm_activity` (who played what, when),
+  `romm_play_sessions` (your session history with durations),
+  `romm_log_play_session` (record a session), `romm_delete_play_session`.
+- **Virtual collections (RomM 5.0+):** `romm_virtual_collections` (automatic
+  groupings by genre/franchise/collection/company/mode) and
+  `romm_virtual_collection_detail`.
+- **Smart collections (RomM 5.0+):** `romm_smart_collection_detail` (rules +
+  matching ROMs), `romm_create_smart_collection`,
+  `romm_update_smart_collection`, `romm_delete_smart_collection`. Filter
+  criteria are validated against the key set RomM's handler actually reads —
+  RomM itself silently ignores unknown keys, which would otherwise turn a typo
+  into a filter that doesn't do what it says.
+- **Identity:** `romm_whoami` — authenticated user, role, and (on 5.0) the
+  effective permission grants from the new permissions engine.
+- **Metadata:** `romm_metadata_search` — search IGDB/MobyGames/etc. for
+  matches for a ROM (read-only; does not change the match).
+- `romm_smart_collections` listing now shows ROM counts and rule summaries.
+
 ## 1.1.0
 
 RomM 5.0 compatibility release, audited against a live 5.0.0 instance's

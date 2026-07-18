@@ -1,9 +1,10 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 28 tools: 19 read-only for browsing, searching, and viewing metadata,
-plus 9 write tools for setting play status, favoriting, notes, and managing
-collections. Targets RomM 5.0+; most read tools degrade gracefully on 4.4+.
+Provides 40 tools: 26 read-only for browsing, searching, and viewing metadata,
+plus 14 write tools for play status, play sessions, favorites, notes, and
+collections (regular and smart). Targets RomM 5.0+; most read tools degrade
+gracefully on 4.4+ (tools marked "RomM 5.0+" need 5.0).
 
 Write tools change only your own user data (play status, favorites, notes) and
 your own collections. No tool modifies ROM files, platforms, firmware, other
@@ -28,12 +29,21 @@ Tools:
   romm_devices             — List registered devices
   romm_rom_notes           — View notes on a ROM
   romm_filters             — Available filter values (genres, regions, etc.)
-  romm_tasks               — Check running/scheduled task status
+  romm_tasks               — Task registry + running task status
   romm_scan_library        — Trigger a background library rescan
+  romm_activity            — Recent play activity feed (RomM 5.0+)
+  romm_play_sessions       — List recorded play sessions (RomM 5.0+)
+  romm_virtual_collections — Automatic metadata groupings (RomM 5.0+)
+  romm_virtual_collection_detail — List ROMs in a virtual collection
+  romm_smart_collection_detail — Smart collection rules + matching ROMs
+  romm_whoami              — Authenticated account, role, and permissions
+  romm_metadata_search     — Search metadata providers for ROM matches
 
 Write tools (modify your user data and collections):
   romm_set_status          — Set play status, backlog, now-playing, rating, completion
   romm_favorite            — Add or remove a ROM from your favorites
+  romm_log_play_session    — Record a play session (RomM 5.0+)
+  romm_delete_play_session — Delete a play session (permanent)
   romm_add_note            — Add a note to a ROM
   romm_update_note         — Edit an existing note
   romm_delete_note         — Delete a note (permanent)
@@ -41,6 +51,9 @@ Write tools (modify your user data and collections):
   romm_add_to_collection   — Add ROMs to a collection
   romm_remove_from_collection — Remove ROMs from a collection
   romm_delete_collection   — Delete a collection (permanent)
+  romm_create_smart_collection — Create a smart collection (saved filter)
+  romm_update_smart_collection — Edit a smart collection
+  romm_delete_smart_collection — Delete a smart collection (permanent)
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
@@ -63,10 +76,12 @@ Security:
 
 from __future__ import annotations
 
+import json as jsonlib
 import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastmcp import FastMCP
@@ -846,8 +861,14 @@ async def romm_smart_collections() -> str:
         name = c.get("name", "Unknown")
         desc = c.get("description", "")
         cid = c.get("id", "?")
+        count = c.get("rom_count")
 
-        lines.append(f"  {name}")
+        header = f"  {name}"
+        if count is not None:
+            header += f" ({count} ROM{'s' if count != 1 else ''})"
+        lines.append(header)
+        if c.get("filter_summary"):
+            lines.append(f"    Rules: {c['filter_summary'][:120]}")
         if desc:
             short = desc[:100]
             if len(desc) > 100:
@@ -1441,6 +1462,402 @@ async def romm_delete_collection(collection_id: int) -> str:
     """
     await _delete(f"collections/{collection_id}")
     return f"Deleted collection {collection_id}."
+
+
+# ── Tools — Activity & Play Sessions (RomM 5.0+) ─────────────────────────
+
+
+@mcp.tool()
+async def romm_activity(rom_id: int = 0, limit: int = 20) -> str:
+    """Recent play activity feed — who started playing what, when (RomM 5.0+).
+
+    rom_id: Limit to one ROM's activity (0 = all).
+    limit: Max entries shown (default 20).
+    """
+    path = f"activity/rom/{rom_id}" if rom_id else "activity"
+    data = await _get(path)
+
+    if not isinstance(data, list) or not data:
+        qualifier = f" for ROM {rom_id}" if rom_id else ""
+        return f"No play activity recorded{qualifier}."
+
+    lines = [f"Play activity (showing {min(len(data), limit)} of {len(data)}):\n"]
+    for a in data[:limit]:
+        user = a.get("username", "?")
+        rom = a.get("rom_name") or f"ROM {a.get('rom_id', '?')}"
+        platform = a.get("platform_name") or a.get("platform_slug", "")
+        started = a.get("started_at", "")
+
+        line = f"  - {user} played {rom}"
+        if platform:
+            line += f" [{platform}]"
+        lines.append(line)
+        if started:
+            lines.append(f"    Started: {started}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_play_sessions(rom_id: int = 0, limit: int = 20) -> str:
+    """List your recorded play sessions — start time and duration (RomM 5.0+).
+
+    rom_id: Filter to one ROM (0 = all).
+    limit: Max sessions (default 20, max 100).
+    """
+    params: dict = {"limit": min(max(limit, 1), 100), "offset": 0}
+    if rom_id:
+        params["rom_id"] = rom_id
+
+    data = await _get("play-sessions", params=params)
+
+    if not isinstance(data, list) or not data:
+        qualifier = f" for ROM {rom_id}" if rom_id else ""
+        return f"No play sessions recorded{qualifier}."
+
+    lines = [f"Play sessions ({len(data)}):\n"]
+    for s in data:
+        sid = s.get("id", "?")
+        srom = s.get("rom_id", "?")
+        start = s.get("start_time", "?")
+        minutes = (s.get("duration_ms") or 0) / 60_000
+
+        line = f"  [{sid}] ROM {srom} — {minutes:.0f} min, started {start}"
+        if s.get("save_slot"):
+            line += f", slot {s['save_slot']}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_log_play_session(rom_id: int, duration_minutes: int,
+                                ended_minutes_ago: int = 0) -> str:
+    """Record a play session on a ROM (RomM 5.0+). Logs to your own history.
+
+    rom_id: The ROM's ID.
+    duration_minutes: How long the session lasted (1-1440).
+    ended_minutes_ago: How many minutes ago it ended (default 0 = just now).
+    """
+    if not 1 <= duration_minutes <= 1440:
+        return "duration_minutes must be between 1 and 1440."
+    if ended_minutes_ago < 0:
+        return "ended_minutes_ago must be >= 0."
+
+    end = datetime.now(timezone.utc) - timedelta(minutes=ended_minutes_ago)
+    start = end - timedelta(minutes=duration_minutes)
+    body = {"sessions": [{
+        "rom_id": rom_id,
+        "start_time": start.isoformat(),
+        "end_time": end.isoformat(),
+        "duration_ms": duration_minutes * 60_000,
+    }]}
+    await _post("play-sessions", body)
+    return (f"Logged a {duration_minutes}-minute play session on ROM {rom_id} "
+            f"(ended {end.strftime('%Y-%m-%d %H:%M UTC')}).")
+
+
+@mcp.tool()
+async def romm_delete_play_session(session_id: int) -> str:
+    """Permanently delete one of your play sessions. This cannot be undone.
+
+    session_id: The session's ID (from romm_play_sessions).
+    """
+    await _delete(f"play-sessions/{session_id}")
+    return f"Deleted play session {session_id}."
+
+
+# ── Tools — Virtual & Smart Collections (RomM 5.0+) ──────────────────────
+
+
+@mcp.tool()
+async def romm_virtual_collections(collection_type: str = "collection",
+                                   limit: int = 50) -> str:
+    """List virtual collections — automatic groupings from metadata (RomM 5.0+).
+
+    collection_type: Grouping to list — "collection", "genre", "franchise",
+                     "company", "mode", or "all" (default "collection").
+    limit: Max collections (default 50).
+    """
+    data = await _get("collections/virtual",
+                      params={"type": collection_type,
+                              "limit": min(max(limit, 1), 200)})
+
+    if not isinstance(data, list) or not data:
+        return f"No virtual collections of type \"{collection_type}\"."
+
+    lines = [f"Virtual collections — {collection_type} ({len(data)}):\n"]
+    for c in data:
+        name = c.get("name", "Unknown")
+        count = c.get("rom_count", 0)
+        cid = c.get("id", "?")
+        lines.append(f"  {name} ({count} ROM{'s' if count != 1 else ''})")
+        lines.append(f"    ID: {cid}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_virtual_collection_detail(virtual_id: str) -> str:
+    """List ROMs in a virtual collection.
+
+    virtual_id: The virtual collection's ID string (from romm_virtual_collections).
+    """
+    data = await _get(f"collections/virtual/{virtual_id}")
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"Virtual collection {virtual_id} not found."
+
+    name = data.get("name", "Unknown")
+    rom_count = data.get("rom_count", 0)
+
+    members = await _get(
+        "roms",
+        params={"virtual_collection_id": virtual_id, "limit": 50, "offset": 0,
+                "order_by": "name", "order_dir": "asc"},
+        long_timeout=True,
+    )
+    roms = members.get("items", []) if isinstance(members, dict) else members
+
+    lines = [f"{name} ({data.get('type', 'virtual')})", f"  ROMs: {rom_count}\n"]
+    if isinstance(roms, list):
+        for i, rom in enumerate(roms[:50], 1):
+            rom_name = rom.get("name", "Unknown")
+            platform = rom.get("platform_display_name") or rom.get("platform_slug", "")
+            line = f"  {i}. {rom_name}"
+            if platform:
+                line += f" [{platform}]"
+            lines.append(line)
+        if rom_count > 50:
+            lines.append(f"\n  ({rom_count - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_smart_collection_detail(collection_id: int) -> str:
+    """Show a smart collection's filter rules and matching ROMs.
+
+    collection_id: The smart collection's ID (from romm_smart_collections).
+    """
+    data = await _get(f"collections/smart/{collection_id}")
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"Smart collection {collection_id} not found."
+
+    name = data.get("name", "Unknown")
+    desc = data.get("description", "")
+    rom_count = data.get("rom_count", 0)
+
+    lines = [name]
+    if desc:
+        lines.append(f"  {desc[:200]}")
+    if data.get("filter_summary"):
+        lines.append(f"  Rules: {data['filter_summary']}")
+    elif data.get("filter_criteria"):
+        lines.append(f"  Criteria: {jsonlib.dumps(data['filter_criteria'])[:200]}")
+    lines.append(f"  ROMs: {rom_count}\n")
+
+    members = await _get(
+        "roms",
+        params={"smart_collection_id": collection_id, "limit": 50, "offset": 0,
+                "order_by": "name", "order_dir": "asc"},
+        long_timeout=True,
+    )
+    roms = members.get("items", []) if isinstance(members, dict) else members
+    if isinstance(roms, list):
+        for i, rom in enumerate(roms[:50], 1):
+            rom_name = rom.get("name", "Unknown")
+            platform = rom.get("platform_display_name") or rom.get("platform_slug", "")
+            line = f"  {i}. {rom_name}"
+            if platform:
+                line += f" [{platform}]"
+            lines.append(line)
+        if rom_count > 50:
+            lines.append(f"\n  ({rom_count - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+# RomM stores filter_criteria as a schemaless dict and silently ignores unknown
+# keys — a typo would create a filter that matches nothing it was meant to.
+# These are the keys its smart-collection handler actually reads (RomM 5.0.0).
+_SMART_FILTER_KEYS = {
+    "platform_ids", "platform_id", "collection_id", "virtual_collection_id",
+    "search_term", "matched", "favorite", "duplicate", "playable", "has_ra",
+    "missing", "verified",
+    "genres", "franchises", "collections", "companies", "age_ratings",
+    "regions", "languages", "tags", "statuses", "metadata_providers",
+    "genres_logic", "franchises_logic", "collections_logic", "companies_logic",
+    "age_ratings_logic", "regions_logic", "languages_logic", "tags_logic",
+    "statuses_logic", "metadata_providers_logic",
+    "order_by", "order_dir",
+}
+
+
+def _validate_smart_criteria(criteria: dict | None) -> str | None:
+    unknown = set(criteria or {}) - _SMART_FILTER_KEYS
+    if unknown:
+        return (f"Unknown filter_criteria key(s): {', '.join(sorted(unknown))}. "
+                f"Valid keys: {', '.join(sorted(_SMART_FILTER_KEYS))}.")
+    return None
+
+
+@mcp.tool()
+async def romm_create_smart_collection(name: str, description: str = "",
+                                       filter_criteria: dict | None = None,
+                                       is_public: bool = False) -> str:
+    """Create a smart collection — a saved filter that auto-matches ROMs (RomM 5.0+).
+
+    name: Collection name (required).
+    description: Optional description.
+    filter_criteria: Filter rules as a dict, using the same keys as the roms
+                     list filters (e.g. {"platform_ids": [5], "genres": ["RPG"],
+                     "search_term": "mario"}). Provide at least one rule.
+    is_public: Visible to other users (default false).
+    """
+    if not name.strip():
+        return "name is required."
+    err = _validate_smart_criteria(filter_criteria)
+    if err:
+        return err
+    data = await _post(
+        "collections/smart",
+        data={"name": name, "description": description,
+              "filter_criteria": jsonlib.dumps(filter_criteria or {})},
+        params={"is_public": is_public},
+    )
+    if isinstance(data, dict) and "id" in data:
+        summary = data.get("filter_summary") or jsonlib.dumps(
+            data.get("filter_criteria", {}))
+        return (f"Created smart collection \"{data.get('name', name)}\" "
+                f"(id: {data['id']}, matches {data.get('rom_count', '?')} ROMs, "
+                f"rules: {summary[:150]}).")
+    return f"Created smart collection \"{name}\"."
+
+
+@mcp.tool()
+async def romm_update_smart_collection(collection_id: int, name: str = "",
+                                       description: str = "",
+                                       filter_criteria: dict | None = None,
+                                       is_public: bool | None = None) -> str:
+    """Edit a smart collection. Only the fields you provide are changed.
+
+    collection_id: The smart collection's ID (from romm_smart_collections).
+    name: New name (empty = unchanged).
+    description: New description (empty = unchanged).
+    filter_criteria: New filter rules dict (omit to leave unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    """
+    err = _validate_smart_criteria(filter_criteria)
+    if err:
+        return err
+    form: dict = {}
+    if name:
+        form["name"] = name
+    if description:
+        form["description"] = description
+    if filter_criteria is not None:
+        form["filter_criteria"] = jsonlib.dumps(filter_criteria)
+    params = {"is_public": is_public} if is_public is not None else None
+
+    if not form and params is None:
+        return "Nothing to update — provide a field to change."
+
+    await _request("PUT", f"collections/smart/{collection_id}",
+                   data=form or None, params=params)
+    return f"Updated smart collection {collection_id}."
+
+
+@mcp.tool()
+async def romm_delete_smart_collection(collection_id: int) -> str:
+    """Permanently delete a smart collection. This cannot be undone.
+
+    Only the saved filter is deleted — the ROMs it matched are untouched.
+
+    collection_id: The smart collection's ID (from romm_smart_collections).
+    """
+    await _delete(f"collections/smart/{collection_id}")
+    return f"Deleted smart collection {collection_id}."
+
+
+# ── Tools — Identity & Metadata (RomM 5.0+) ──────────────────────────────
+
+
+@mcp.tool()
+async def romm_whoami() -> str:
+    """Show the authenticated account — identity, role, and effective permissions."""
+    me = await _get("users/me")
+
+    lines = []
+    if isinstance(me, dict) and me:
+        lines.append(f"User: {me.get('username', '?')} (id {me.get('id', '?')})")
+        if me.get("role"):
+            lines.append(f"  Role: {me['role']}")
+        if me.get("enabled") is not None:
+            lines.append(f"  Enabled: {me['enabled']}")
+
+    # Permissions engine is RomM 5.0+ — absent on 4.x.
+    try:
+        perms = await _get("permissions/me")
+    except RuntimeError:
+        perms = None
+    if isinstance(perms, dict) and perms:
+        if perms.get("is_admin"):
+            lines.append("  Admin: yes (all permissions)")
+        grants = perms.get("grants") or []
+        if isinstance(grants, dict):
+            grants = [k for k, v in grants.items() if v]
+        if grants:
+            shown = ", ".join(str(g) for g in sorted(grants)[:25])
+            if len(grants) > 25:
+                shown += f" (+{len(grants) - 25} more)"
+            lines.append(f"  Grants ({len(grants)}): {shown}")
+        hidden = perms.get("hidden") or []
+        if hidden:
+            lines.append(f"  Hidden items: {len(hidden)}")
+
+    return "\n".join(lines) if lines else "Could not read account info."
+
+
+@mcp.tool()
+async def romm_metadata_search(rom_id: int, search_term: str = "",
+                               search_by: str = "name") -> str:
+    """Search metadata providers (IGDB, MobyGames, ...) for matches for a ROM.
+
+    Useful for identifying an unmatched ROM or checking alternate matches
+    (RomM 5.0+). Read-only: it does not change the ROM's match.
+
+    rom_id: The ROM to find matches for (required by RomM).
+    search_term: Override the search text (default: the ROM's own name).
+    search_by: "name" (default) or "id".
+    """
+    params: dict = {"rom_id": rom_id, "search_by": search_by}
+    if search_term:
+        params["search_term"] = search_term
+
+    data = await _get("search/roms", params=params, long_timeout=True)
+
+    if not isinstance(data, list) or not data:
+        return "No metadata matches found."
+
+    lines = [f"Metadata matches ({len(data)}):\n"]
+    for m in data[:20]:
+        name = m.get("name", "?")
+        slug = m.get("slug", "")
+        providers = [p for p in ("igdb", "moby", "launchbox", "flashpoint",
+                                 "sgdb", "libretro")
+                     if m.get(f"{p}_id")]
+        line = f"  - {name}"
+        if slug:
+            line += f" ({slug})"
+        if providers:
+            line += f" — providers: {', '.join(providers)}"
+        lines.append(line)
+    if len(data) > 20:
+        lines.append(f"\n  ({len(data) - 20} more not shown)")
+
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

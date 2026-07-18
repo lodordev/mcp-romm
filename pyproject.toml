@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-romm"
-version = "1.1.0"
+version = "1.2.0"
 description = "MCP server for RomM — browse and manage your retro game library with AI"
 readme = "README.md"
 license = "MIT"

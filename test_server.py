@@ -7,6 +7,7 @@ Run:
     uv run pytest test_server.py -v
 """
 
+import json
 import os
 
 import pytest
@@ -198,6 +199,100 @@ async def test_delete_note(calls):
     assert calls[0]["method"] == "DELETE"
     assert calls[0]["path"] == "roms/5/notes/11"
     assert "Deleted note 11" in out
+
+
+# ── play sessions, smart/virtual collections, identity (v1.2) ────────────────
+
+
+async def test_log_play_session_builds_payload(calls):
+    calls.responses.append({})
+    out = await server.romm_log_play_session(42, 30)
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "play-sessions"
+    sessions = req["json"]["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["rom_id"] == 42
+    assert sessions[0]["duration_ms"] == 30 * 60_000
+    assert sessions[0]["start_time"] < sessions[0]["end_time"]
+    assert "Logged a 30-minute" in out
+
+
+async def test_log_play_session_bounds(calls):
+    out = await server.romm_log_play_session(42, 0)
+    assert "between 1 and 1440" in out
+    assert not calls
+
+
+async def test_delete_play_session(calls):
+    calls.responses.append({})
+    out = await server.romm_delete_play_session(7)
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["path"] == "play-sessions/7"
+    assert "Deleted play session 7" in out
+
+
+async def test_activity_rom_scoped_path(calls):
+    calls.responses.append([{"username": "j", "rom_name": "Chrono Trigger",
+                             "platform_name": "SNES",
+                             "started_at": "2026-07-18T00:00:00Z"}])
+    out = await server.romm_activity(rom_id=5)
+    assert calls[0]["path"] == "activity/rom/5"
+    assert "j played Chrono Trigger [SNES]" in out
+
+
+async def test_virtual_collections_params(calls):
+    calls.responses.append([{"id": "abc123", "name": "Mario", "rom_count": 9}])
+    out = await server.romm_virtual_collections("franchise")
+    assert calls[0]["params"]["type"] == "franchise"
+    assert "Mario (9 ROMs)" in out
+    assert "abc123" in out
+
+
+async def test_create_smart_collection_encodes_criteria(calls):
+    calls.responses.append({"id": 3, "name": "SNES RPGs", "rom_count": 12,
+                            "filter_summary": "platform SNES"})
+    out = await server.romm_create_smart_collection(
+        "SNES RPGs", filter_criteria={"platform_ids": [5], "genres": ["RPG"]})
+    req = calls[0]
+    assert req["path"] == "collections/smart"
+    assert json.loads(req["data"]["filter_criteria"]) == {
+        "platform_ids": [5], "genres": ["RPG"]}
+    assert req["params"] == {"is_public": False}
+    assert "id: 3" in out
+
+
+async def test_create_smart_collection_rejects_unknown_keys(calls):
+    out = await server.romm_create_smart_collection(
+        "X", filter_criteria={"platfrom_ids": [5]})
+    assert "Unknown filter_criteria key" in out
+    assert "platfrom_ids" in out
+    assert not calls
+
+
+async def test_update_smart_collection_noop(calls):
+    out = await server.romm_update_smart_collection(3)
+    assert "Nothing to update" in out
+    assert not calls
+
+
+async def test_whoami_formats_identity_and_grants(calls):
+    calls.responses.append({"id": 1, "username": "romm", "role": "admin",
+                            "enabled": True})
+    calls.responses.append({"is_admin": True, "grants": ["roms.read"],
+                            "hidden": []})
+    out = await server.romm_whoami()
+    assert "User: romm" in out
+    assert "Admin: yes" in out
+
+
+async def test_metadata_search_params(calls):
+    calls.responses.append([{"name": "Super Mario 64", "slug": "sm64",
+                             "igdb_id": 1074, "moby_id": None}])
+    out = await server.romm_metadata_search(42)
+    assert calls[0]["params"] == {"rom_id": 42, "search_by": "name"}
+    assert "Super Mario 64" in out
+    assert "igdb" in out
 
 
 # ── tasks & scan ─────────────────────────────────────────────────────────────

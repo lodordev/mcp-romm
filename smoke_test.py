@@ -104,6 +104,7 @@ async def read_tools() -> dict:
     # Hash search: find a ROM that actually has an md5.
     detail = await server._get(f"roms/{ctx['rom_a']}")
     md5 = detail.get("md5_hash") if isinstance(detail, dict) else None
+    ctx["platform_a"] = detail.get("platform_id") if isinstance(detail, dict) else None
     if md5:
         out = await tool_out("romm_search_by_hash",
                              server.romm_search_by_hash(md5_hash=md5))
@@ -171,6 +172,38 @@ async def read_tools() -> dict:
     out = await tool_out("romm_tasks", server.romm_tasks())
     if out is not None:
         check("romm_tasks", looks_ok(out), out)
+
+    out = await tool_out("romm_whoami", server.romm_whoami())
+    if out is not None:
+        check("romm_whoami", "User:" in out, out)
+
+    out = await tool_out("romm_activity", server.romm_activity(limit=5))
+    if out is not None:
+        check("romm_activity", looks_ok(out), out)
+
+    out = await tool_out("romm_play_sessions", server.romm_play_sessions(limit=5))
+    if out is not None:
+        check("romm_play_sessions", looks_ok(out), out)
+
+    out = await tool_out("romm_virtual_collections",
+                         server.romm_virtual_collections("genre", limit=10))
+    if out is not None:
+        check("romm_virtual_collections", looks_ok(out), out)
+        m = re.search(r"ID: (\S+)", out)
+        if m:
+            out2 = await tool_out(
+                "romm_virtual_collection_detail",
+                server.romm_virtual_collection_detail(m.group(1)))
+            if out2 is not None:
+                check("romm_virtual_collection_detail",
+                      looks_ok(out2) and "ROMs:" in out2, out2)
+        else:
+            print("SKIP  virtual collection detail — no virtual collections")
+
+    out = await tool_out("romm_metadata_search",
+                         server.romm_metadata_search(ctx["rom_a"]))
+    if out is not None:
+        check("romm_metadata_search", looks_ok(out), out)
 
     return ctx
 
@@ -302,12 +335,86 @@ async def test_collections(rom_a: int, rom_b: int) -> None:
                 check("romm_delete_collection", False, f"raised: {e}")
 
 
+async def test_play_sessions_flow(rom_a: int) -> None:
+    sid = None
+    try:
+        out = await server.romm_log_play_session(rom_a, 2, ended_minutes_ago=1)
+        check("romm_log_play_session", "Logged a 2-minute" in out, out)
+        sessions = await server._get(
+            "play-sessions", params={"rom_id": rom_a, "limit": 50, "offset": 0})
+        if isinstance(sessions, list) and sessions:
+            newest = max(sessions, key=lambda s: s.get("created_at") or "")
+            sid = newest.get("id")
+        check("play session recorded", sid is not None, str(sessions)[:200])
+    except Exception as e:
+        check("romm play-sessions flow", False, f"raised: {e}")
+    finally:
+        if sid is not None:
+            try:
+                out = await server.romm_delete_play_session(sid)
+                check("romm_delete_play_session",
+                      "Deleted play session" in out, out)
+                sessions = await server._get(
+                    "play-sessions",
+                    params={"rom_id": rom_a, "limit": 50, "offset": 0})
+                gone = not any(s.get("id") == sid for s in sessions) \
+                    if isinstance(sessions, list) else True
+                check("play session cleanup verified", gone, str(sessions)[:200])
+            except Exception as e:
+                check("romm_delete_play_session", False, f"raised: {e}")
+
+
+async def test_smart_collections_flow(platform_id: int) -> None:
+    cname = f"mcp-e2e-smart-{int(time.time())}"
+    cid = None
+    try:
+        out = await server.romm_create_smart_collection(
+            cname, description="throwaway",
+            filter_criteria={"platform_ids": [platform_id]})
+        check("romm_create_smart_collection",
+              "Created smart collection" in out, out)
+        m = re.search(r"id: (\d+)", out)
+        cid = int(m.group(1)) if m else None
+        if cid is None:
+            cols = await server._get("collections/smart")
+            if isinstance(cols, list):
+                cid = next((c.get("id") for c in cols
+                            if c.get("name") == cname), None)
+        check("smart collection exists", cid is not None, out)
+        if cid is not None:
+            out = await server.romm_smart_collection_detail(cid)
+            check("romm_smart_collection_detail", "ROMs:" in out, out)
+            out = await server.romm_update_smart_collection(
+                cid, description="updated")
+            check("romm_update_smart_collection",
+                  "Updated smart collection" in out, out)
+    except Exception as e:
+        check("romm smart-collections flow", False, f"raised: {e}")
+    finally:
+        if cid is not None:
+            try:
+                out = await server.romm_delete_smart_collection(cid)
+                check("romm_delete_smart_collection",
+                      "Deleted smart collection" in out, out)
+                cols = await server._get("collections/smart")
+                gone = not any(isinstance(c, dict) and c.get("id") == cid
+                               for c in cols) if isinstance(cols, list) else True
+                check("smart collection cleanup verified", gone, str(cols)[:200])
+            except Exception as e:
+                check("romm_delete_smart_collection", False, f"raised: {e}")
+
+
 async def write_tools(ctx: dict) -> None:
-    """Run all 9 write tools with capture-and-restore / throwaway fixtures."""
+    """Run all 14 write tools with capture-and-restore / throwaway fixtures."""
     await test_set_status(ctx["rom_a"])
     await test_favorite(ctx["rom_a"])
     await test_notes(ctx["rom_a"])
     await test_collections(ctx["rom_a"], ctx["rom_b"])
+    await test_play_sessions_flow(ctx["rom_a"])
+    if ctx.get("platform_a"):
+        await test_smart_collections_flow(ctx["platform_a"])
+    else:
+        print("SKIP  smart collections flow — no platform id captured")
 
     # scan_library: real trigger where allowed; RomM 5.0 refuses manual scans
     # over REST, and the tool reporting that refusal IS correct behavior.
