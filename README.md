@@ -159,6 +159,15 @@ The server uses OAuth2 password grant to authenticate with RomM. Tokens are scop
 
 **RomM 5.0 role change:** RomM 5.0 collapsed the old `viewer`/`editor`/`admin` roles into `user`/`admin` and moved fine-grained authorization to a permissions system (legacy roles are coerced to `user` on upgrade). If a tool unexpectedly gets a 403 on a 5.0 instance, check the account's effective permissions (`GET /api/permissions/me`) in the RomM admin UI.
 
+## Known issues
+
+- **RomM 5.0.0: `romm_filters` times out.** `GET /api/roms/filters` in RomM
+  5.0.0 executes a query with a cartesian product (RomM's log flags it at
+  `roms_handler.py:2159`); the request hangs until the client timeout, and the
+  abandoned query keeps running server-side at high CPU. Avoid calling
+  `romm_filters` on 5.0.0 until this is fixed upstream — every call strands
+  another runaway database query.
+
 ## License
 
 MIT. See [CHANGELOG.md](CHANGELOG.md) for release history.
