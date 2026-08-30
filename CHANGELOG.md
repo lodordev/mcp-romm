@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.3.0
+
+RomM 5.1 and 5.2 coverage — 18 new tools (58 total), plus MCP annotations on
+every tool and scope negotiation so a newer feature set can never take down an
+older server.
+
+The RomM API is purely additive from 5.0.0 to 5.2.0 (26 routes added, none
+removed or changed), so nothing that worked before is affected.
+
+### Added
+
+- **Soundtracks (RomM 5.0+ / 5.1+):** `romm_music_tracks` (browse and filter
+  the soundtrack library) and `romm_music_facets` (distinct artists, albums,
+  genres, years with counts) work on 5.0+. On 5.1+: `romm_music_favorites`,
+  `romm_music_favorite` (add/remove), `romm_music_playlists`,
+  `romm_music_playlist` (details + tracks in order),
+  `romm_create_music_playlist`, `romm_update_music_playlist`,
+  `romm_delete_music_playlist`, and `romm_music_playlist_tracks`
+  (add/remove/reorder).
+- **Emulator streaming (RomM 5.1+):** `romm_streaming_config` (enabled?,
+  platforms, per-platform save-slot capabilities), `romm_streaming_sessions`,
+  `romm_streaming_start` (launch a ROM server-side, returns the stream URL),
+  `romm_streaming_state` (save/load a state mid-game), `romm_streaming_audio`
+  (volume, mute/toggle), and `romm_streaming_stop` (save-and-exit or plain
+  release). This is the one cluster that reaches beyond your own account data:
+  it starts and stops a server-side emulator container and can write that
+  emulator's save states. It does not touch RomM's battery-save files.
+- **Discovery:** `romm_random_rom` (RomM 5.2+) picks one ROM at random,
+  optionally scoped to a platform or any collection type;
+  `romm_platform_folders` (RomM 5.1+) lists platform folders on disk that RomM
+  has never scanned — the usual reason a copied-in game doesn't appear.
+- **MCP tool annotations on all 58 tools** — `readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint` — so clients can
+  distinguish a browse from a delete without parsing descriptions. 34 read-only,
+  24 write, 6 flagged destructive.
+- **Version gate.** New tools check the server version from `/api/heartbeat`
+  (cached) and explain what they need on an older instance instead of
+  returning a bare 404. The gate fails open when the version can't be read, so
+  an unreadable heartbeat never refuses a call on a guess. `romm_status` now
+  reports the version and a per-cluster capability list.
+
+### Changed
+
+- **Scopes are negotiated instead of assumed.** RomM rejects an entire token
+  request with `403 Insufficient scope` when any one requested scope falls
+  outside the account's set, so adding `playlists.*` naively would have broken
+  *every* tool against a 5.0 server. Optional tiers (`tasks.run`, and the
+  5.1-only `playlists.read`/`playlists.write`) are now probed once on first
+  authentication and dropped if refused; the result is cached for the process
+  so token expiry doesn't re-probe. This also fixes a latent problem: a
+  least-privilege account without the admin-tier `tasks.run` previously failed
+  authentication outright rather than losing just `romm_scan_library`.
+  `romm_status` reports granted and dropped scopes.
+
+### Not implemented (deliberate)
+
+RomM 5.1 also added `DELETE /api/roms/{id}/files/{id}` and
+`PUT /api/config/scan`. Deleting library files and rewriting server scan
+configuration are both outside this server's boundary; no tool was added and
+neither scope is requested.
+
+### Verification
+
+96 unit tests (up from 49), ruff clean. The 5.1/5.2 tools were built against
+RomM's tagged source — routes, request bodies, response shapes and scope
+requirements read from the 5.1.0 and 5.2.0 tags — and are **not yet verified
+against a live 5.1/5.2 instance**.
+
 ## 1.2.1
 
 ### Added

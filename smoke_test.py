@@ -1,7 +1,7 @@
 """Live end-to-end test for mcp-romm — every tool against a real RomM instance.
 
-Exercises the ACTUAL server.py tool code (all 19 read tools and all 9 write
-tools) over HTTP against a live RomM. Write tests are self-cleaning: they
+Exercises the ACTUAL server.py tool code (every read tool and every safe write
+tool) over HTTP against a live RomM. Write tests are self-cleaning: they
 operate on a throwaway collection and note, and capture-and-restore any user
 props they touch. The only lasting side effect is romm_scan_library, which
 triggers the same background quick-scan the scheduler runs.
@@ -57,7 +57,7 @@ async def tool_out(name: str, coro) -> str | None:
 
 
 async def read_tools() -> dict:
-    """Run all 19 read tools; return context (ids) for the write tests."""
+    """Run the read tools; return context (ids) for the write tests."""
     ctx: dict = {}
 
     out = await tool_out("romm_status", server.romm_status())
@@ -205,7 +205,96 @@ async def read_tools() -> dict:
     if out is not None:
         check("romm_metadata_search", looks_ok(out), out)
 
+    await read_tools_new(ctx)
     return ctx
+
+
+def _gated(out: str) -> bool:
+    """True when a tool refused because the server is older than the feature.
+
+    That is a pass: the gate did its job. It is the 404 we are trying not to see.
+    """
+    return "or newer" in out or "did not grant" in out
+
+
+async def read_tools_new(ctx: dict) -> None:
+    """Read tools added in 1.3.0 (RomM 5.1/5.2 features, version-gated).
+
+    On a 5.0 server the gated tools should each explain themselves rather than
+    error — that outcome is a PASS, and is exactly what these assert.
+    """
+    version = ctx.get("version", "?")
+    print(f"\n--- 5.1/5.2 feature tools (server reports {version}) ---")
+
+    # Soundtracks: /music/tracks and the facets exist on 5.0 too.
+    out = await tool_out("romm_music_tracks", server.romm_music_tracks(limit=5))
+    if out is not None:
+        check("romm_music_tracks", looks_ok(out), out)
+        m = re.search(r"track file id: (\d+)", out)
+        if m:
+            ctx["track_id"] = int(m.group(1))
+
+    out = await tool_out("romm_music_facets", server.romm_music_facets(field="artists"))
+    if out is not None:
+        check("romm_music_facets", looks_ok(out), out)
+
+    out = await tool_out("romm_music_facets (bad field)",
+                         server.romm_music_facets(field="composers"))
+    if out is not None:
+        check("romm_music_facets (bad field)", "artists" in out, out)
+
+    # 5.1+ — gated.
+    out = await tool_out("romm_music_favorites", server.romm_music_favorites(limit=5))
+    if out is not None:
+        check("romm_music_favorites", looks_ok(out) or _gated(out), out)
+
+    out = await tool_out("romm_music_playlists", server.romm_music_playlists())
+    if out is not None:
+        check("romm_music_playlists", looks_ok(out) or _gated(out), out)
+        m = re.search(r"ID: (\d+)", out)
+        if m:
+            out2 = await tool_out("romm_music_playlist",
+                                  server.romm_music_playlist(int(m.group(1))))
+            if out2 is not None:
+                check("romm_music_playlist", looks_ok(out2), out2)
+        else:
+            print("SKIP  romm_music_playlist — no playlists on this server")
+
+    out = await tool_out("romm_streaming_config", server.romm_streaming_config())
+    if out is not None:
+        check("romm_streaming_config", looks_ok(out) or _gated(out), out)
+
+    # Admin-only server-side; a non-admin account gets the explanation, not data.
+    out = await tool_out("romm_streaming_sessions", server.romm_streaming_sessions())
+    if out is not None:
+        check("romm_streaming_sessions",
+              looks_ok(out) or _gated(out) or "admin-only" in out, out)
+
+    out = await tool_out("romm_platform_folders", server.romm_platform_folders())
+    if out is not None:
+        check("romm_platform_folders", looks_ok(out) or _gated(out), out)
+
+    # 5.2+ — gated.
+    out = await tool_out("romm_random_rom", server.romm_random_rom())
+    if out is not None:
+        check("romm_random_rom", looks_ok(out) or _gated(out), out)
+
+    if ctx.get("platform_a"):
+        out = await tool_out("romm_random_rom (scoped)",
+                             server.romm_random_rom(platform_id=ctx["platform_a"]))
+        if out is not None:
+            check("romm_random_rom (scoped)", looks_ok(out) or _gated(out), out)
+
+    # Scope negotiation is only observable after the first authenticated call,
+    # which by now has happened. Report what the server actually granted.
+    if server._scopes.negotiated:
+        dropped = ", ".join(server._scopes.dropped_tiers) or "none"
+        print(f"INFO  scopes granted: {len(server._scopes.granted)}, dropped: {dropped}")
+        check("scope negotiation", bool(server._scopes.granted),
+              "negotiation produced an empty scope set")
+    else:
+        check("scope negotiation", False,
+              "negotiation never ran despite authenticated calls having succeeded")
 
 
 async def test_set_status(rom_a: int) -> None:
@@ -405,7 +494,7 @@ async def test_smart_collections_flow(platform_id: int) -> None:
 
 
 async def write_tools(ctx: dict) -> None:
-    """Run all 14 write tools with capture-and-restore / throwaway fixtures."""
+    """Run the write tools with capture-and-restore / throwaway fixtures."""
     await test_set_status(ctx["rom_a"])
     await test_favorite(ctx["rom_a"])
     await test_notes(ctx["rom_a"])

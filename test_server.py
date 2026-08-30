@@ -10,6 +10,7 @@ Run:
 import json
 import os
 
+import httpx
 import pytest
 
 # Ensure import doesn't depend on real credentials.
@@ -458,3 +459,450 @@ async def test_delete_collection(calls):
     assert calls[0]["method"] == "DELETE"
     assert calls[0]["path"] == "collections/4"
     assert "Deleted collection 4" in out
+
+
+# ── Version parsing & capability gate ────────────────────────────────────
+
+
+@pytest.fixture
+def fresh_version(monkeypatch):
+    """Reset the cached server version so each gate test starts clean."""
+    monkeypatch.setattr(server, "_version", server._VersionState())
+    monkeypatch.setattr(server, "_scopes", server._ScopeState())
+    return server
+
+
+def test_parse_version_handles_plain_prefixed_and_prerelease():
+    assert server._parse_version("5.2.0") == (5, 2, 0)
+    assert server._parse_version("v5.1.0") == (5, 1, 0)
+    # A pre-release already carries that version's endpoints, so it sorts as the base.
+    assert server._parse_version("5.1.0-beta.2") == (5, 1, 0)
+    assert server._parse_version("5.1") == (5, 1, 0)
+    assert server._parse_version("unknown") is None
+    assert server._parse_version("") is None
+
+
+async def test_version_gate_blocks_older_server(fresh_version, calls):
+    calls.responses.append({"SYSTEM": {"VERSION": "5.0.0"}})
+    msg = await server._version_gate(server._V_5_1, "Music playlists")
+    assert msg is not None
+    assert "5.1.0 or newer" in msg
+    assert "5.0.0" in msg
+
+
+async def test_version_gate_allows_newer_server(fresh_version, calls):
+    calls.responses.append({"SYSTEM": {"VERSION": "5.2.0"}})
+    assert await server._version_gate(server._V_5_1, "Music playlists") is None
+
+
+async def test_version_gate_fails_open_when_version_unreadable(fresh_version, calls):
+    """An unreadable version must not refuse the call on a guess."""
+    calls.responses.append({"SYSTEM": {}})
+    assert await server._version_gate(server._V_5_2, "Random ROM pick") is None
+
+
+async def test_version_is_cached_after_first_read(fresh_version, calls):
+    calls.responses.append({"SYSTEM": {"VERSION": "5.2.0"}})
+    await server._server_version()
+    await server._server_version()
+    assert len(calls) == 1
+
+
+async def test_music_playlists_blocked_on_50_server(fresh_version, calls):
+    calls.responses.append({"SYSTEM": {"VERSION": "5.0.0"}})
+    out = await server.romm_music_playlists()
+    assert "5.1.0 or newer" in out
+    # Only the heartbeat went out — no doomed request to the missing endpoint.
+    assert [c["path"] for c in calls] == ["heartbeat"]
+
+
+async def test_random_rom_blocked_on_51_server(fresh_version, calls):
+    calls.responses.append({"SYSTEM": {"VERSION": "5.1.0"}})
+    out = await server.romm_random_rom()
+    assert "5.2.0 or newer" in out
+    assert [c["path"] for c in calls] == ["heartbeat"]
+
+
+def test_scope_gate_silent_before_negotiation(fresh_version):
+    """Before negotiation runs, the gate must not refuse on stale state."""
+    assert server._scope_gate("playlists", "Music playlists") is None
+
+
+def test_scope_gate_speaks_once_tier_is_known_missing(fresh_version):
+    server._scopes.negotiated = True
+    server._scopes.dropped_tiers = ("playlists",)
+    msg = server._scope_gate("playlists", "Music playlists")
+    assert msg is not None and "playlists scope" in msg
+
+
+# ── Scope negotiation ────────────────────────────────────────────────────
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = "Insufficient scope" if status_code == 403 else "ok"
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("err", request=None, response=self)  # type: ignore
+
+
+@pytest.fixture
+def grants(monkeypatch):
+    """Stub the password grant, recording every scope string requested.
+
+    `grants.allow` is the set of scopes the fake server will accept; a request
+    for anything outside it 403s, exactly as RomM's token endpoint does.
+    """
+    recorded = []
+
+    class _Grants:
+        allow: set = set()
+        calls = recorded
+
+    state = _Grants()
+
+    async def fake_grant(scope):
+        recorded.append(scope)
+        if set(scope.split()) <= state.allow:
+            return _FakeResponse(200, {"access_token": "tok", "expires": 1800})
+        return _FakeResponse(403)
+
+    monkeypatch.setattr(server, "_password_grant", fake_grant)
+    monkeypatch.setattr(server, "_token", server._TokenState())
+    monkeypatch.setattr(server, "_scopes", server._ScopeState())
+    return state
+
+
+async def test_negotiation_keeps_everything_when_server_grants_all(grants):
+    grants.allow = set(server._DEFAULT_SCOPES.split())
+    token = await server._acquire_token()
+    assert token == "tok"
+    assert len(grants.calls) == 1  # no probing needed
+    assert server._scopes.dropped_tiers == ()
+    assert "playlists.read" in server._scopes.granted
+
+
+async def test_negotiation_drops_playlists_on_50_server(grants):
+    """A 5.0 server has no playlists.* scope — dropping it must not break the rest."""
+    grants.allow = set(server._CORE_SCOPES) | {"tasks.run"}
+    token = await server._acquire_token()
+    assert token == "tok"
+    assert server._scopes.dropped_tiers == ("playlists",)
+    assert "tasks.run" in server._scopes.granted
+    assert "playlists.read" not in server._scopes.granted
+
+
+async def test_negotiation_drops_tasks_for_least_privilege_account(grants):
+    """tasks.run is admin-tier; a scoped service account keeps everything else."""
+    grants.allow = set(server._CORE_SCOPES)
+    token = await server._acquire_token()
+    assert token == "tok"
+    assert set(server._scopes.dropped_tiers) == {"tasks", "playlists"}
+    assert set(server._scopes.granted) == set(server._CORE_SCOPES)
+
+
+async def test_negotiation_surfaces_real_auth_failure(grants):
+    """A bad password is not a scope problem — don't mask it by degrading."""
+    grants.allow = set()
+    with pytest.raises(RuntimeError, match="auth failed"):
+        await server._acquire_token()
+
+
+async def test_negotiation_runs_once_then_reuses_result(grants):
+    grants.allow = set(server._CORE_SCOPES)
+    await server._acquire_token()
+    first = len(grants.calls)
+    server._token.access_token = ""  # force re-auth, e.g. token expiry
+    await server._acquire_token()
+    # Re-auth is a single grant with the already-negotiated set, not a re-probe.
+    assert len(grants.calls) == first + 1
+    assert grants.calls[-1] == " ".join(server._CORE_SCOPES)
+
+
+async def test_negotiation_never_requests_dangerous_write_scopes(grants):
+    grants.allow = set(server._DEFAULT_SCOPES.split())
+    await server._acquire_token()
+    for scope_string in grants.calls:
+        requested = set(scope_string.split())
+        assert not requested & {"roms.write", "platforms.write", "firmware.write",
+                               "assets.write", "users.write", "users.read",
+                               "me.write", "devices.write"}
+
+
+# ── New tools: request shaping ───────────────────────────────────────────
+
+
+@pytest.fixture
+def modern(monkeypatch):
+    """Pretend the server is 5.2.0 so version gates pass without a heartbeat."""
+    monkeypatch.setattr(
+        server, "_version",
+        server._VersionState(checked=True, raw="5.2.0", parsed=(5, 2, 0)))
+    monkeypatch.setattr(server, "_scopes", server._ScopeState())
+
+
+async def test_music_tracks_shapes_filters(modern, calls):
+    calls.responses.append({"items": [], "total": 0})
+    await server.romm_music_tracks(search="zelda", artist="Koji Kondo",
+                                   platform_id=3, year=1998, limit=500)
+    p = calls[0]["params"]
+    assert calls[0]["path"] == "music/tracks"
+    assert p["search"] == "zelda"
+    assert p["artist"] == "Koji Kondo"
+    assert p["platform_ids"] == 3
+    assert p["year"] == 1998
+    assert p["limit"] == 200  # clamped
+
+
+async def test_music_tracks_omits_unset_filters(modern, calls):
+    calls.responses.append({"items": [], "total": 0})
+    await server.romm_music_tracks()
+    assert set(calls[0]["params"]) == {"order_by", "order_dir", "limit", "offset"}
+
+
+async def test_music_tracks_formats_a_track(modern, calls):
+    calls.responses.append({"items": [{
+        "rom_file_id": 77, "rom_id": 5, "title": "Overworld",
+        "artist": "Koji Kondo", "album": "OST", "year": 1986,
+        "duration_seconds": 95, "is_favorite": True,
+        "game_name": "Zelda", "platform_name": "NES",
+    }], "total": 1})
+    out = await server.romm_music_tracks()
+    assert "Overworld" in out
+    assert "Koji Kondo" in out
+    assert "1:35" in out            # duration formatted
+    assert "track file id: 77" in out
+
+
+async def test_music_favorite_add_and_remove(modern, calls):
+    calls.responses.append({"added": 2})
+    out = await server.romm_music_favorite([1, 2])
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "music/favorites"
+    assert calls[0]["json"] == {"rom_file_ids": [1, 2]}
+    assert "Added 2" in out
+
+    calls.responses.append({"removed": 1})
+    out = await server.romm_music_favorite([1], action="remove")
+    assert calls[1]["method"] == "DELETE"
+    assert "Removed 1" in out
+
+
+async def test_music_favorite_rejects_bad_action(modern, calls):
+    out = await server.romm_music_favorite([1], action="toggle")
+    assert "add" in out and "remove" in out
+    assert not calls
+
+
+async def test_music_favorite_rejects_empty_ids(modern, calls):
+    out = await server.romm_music_favorite([])
+    assert "at least one" in out
+    assert not calls
+
+
+async def test_create_music_playlist_uses_json_body(modern, calls):
+    calls.responses.append({"id": 9, "name": "Chill"})
+    out = await server.romm_create_music_playlist("Chill", description="calm")
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "music/playlists"
+    assert calls[0]["json"] == {"name": "Chill", "is_public": False,
+                                "description": "calm"}
+    assert "id: 9" in out
+
+
+async def test_update_music_playlist_sends_only_changed_fields(modern, calls):
+    calls.responses.append({})
+    await server.romm_update_music_playlist(9, name="New")
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["json"] == {"name": "New"}
+
+
+async def test_update_music_playlist_noop_makes_no_request(modern, calls):
+    out = await server.romm_update_music_playlist(9)
+    assert "Nothing to update" in out
+    assert not calls
+
+
+async def test_playlist_tracks_reorder_uses_order_endpoint(modern, calls):
+    calls.responses.append({})
+    out = await server.romm_music_playlist_tracks(9, [3, 1, 2], action="reorder")
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "music/playlists/9/tracks/order"
+    assert calls[0]["json"] == {"rom_file_ids": [3, 1, 2]}
+    assert "Reordered 3" in out
+
+
+async def test_playlist_tracks_remove_uses_delete(modern, calls):
+    calls.responses.append({"removed": 2})
+    await server.romm_music_playlist_tracks(9, [1, 2], action="remove")
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["path"] == "music/playlists/9/tracks"
+
+
+async def test_music_facets_rejects_unknown_field(modern, calls):
+    out = await server.romm_music_facets(field="composers")
+    assert "artists" in out and "albums" in out
+    assert not calls
+
+
+async def test_music_facets_queries_the_right_endpoint(modern, calls):
+    calls.responses.append({"items": [{"value": "Nobuo Uematsu", "count": 42}],
+                            "total": 1})
+    out = await server.romm_music_facets(field="artists")
+    assert calls[0]["path"] == "music/artists"
+    assert "Nobuo Uematsu" in out and "42 track(s)" in out
+
+
+async def test_streaming_config_reports_disabled(modern, calls):
+    calls.responses.append({"enabled": False, "containers": []})
+    out = await server.romm_streaming_config()
+    assert "disabled" in out.lower()
+
+
+async def test_streaming_config_lists_slot_capabilities(modern, calls):
+    calls.responses.append({"enabled": True, "containers": [
+        {"platform": "ps2", "host": "http://box:3000", "label": "PS2",
+         "capabilities": {"max_slots": 9, "has_autosave": True, "autosave_slot": 10}},
+    ]})
+    out = await server.romm_streaming_config()
+    assert "save slots 1-9" in out
+    assert "autosave slot 10" in out
+
+
+async def test_streaming_start_posts_rom_id(modern, calls):
+    calls.responses.append({"platform": "ps2", "host": "http://box:3000",
+                            "label": "PS2", "rom_name": "SotC",
+                            "claimed_at": "2026-08-30T00:00:00Z"})
+    out = await server.romm_streaming_start(12)
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "streaming/sessions"
+    assert calls[0]["json"] == {"rom_id": 12}
+    assert "SotC" in out and "http://box:3000" in out
+
+
+async def test_streaming_start_explains_conflict(modern, monkeypatch):
+    async def boom(*a, **k):
+        raise RuntimeError("API error 409: Session in use")
+    monkeypatch.setattr(server, "_request", boom)
+    out = await server.romm_streaming_start(12)
+    assert "already in use" in out
+
+
+async def test_streaming_state_load_uses_load_endpoint(modern, calls):
+    calls.responses.append({"status": "ok", "loaded": True})
+    out = await server.romm_streaming_state("ps2", action="load", slot=3)
+    assert calls[0]["path"] == "streaming/sessions/ps2/load-state"
+    assert calls[0]["json"] == {"slot": 3}
+    assert "Loaded from slot 3" in out
+
+
+async def test_streaming_state_explains_bad_slot(modern, monkeypatch):
+    async def boom(*a, **k):
+        raise RuntimeError("API error 422: Slot 9 is not available")
+    monkeypatch.setattr(server, "_request", boom)
+    out = await server.romm_streaming_state("ngc", slot=9)
+    assert "not available" in out
+    assert "romm_streaming_config" in out
+
+
+async def test_streaming_audio_toggles_mute_when_nothing_given(modern, calls):
+    calls.responses.append({"status": "ok", "mute": True})
+    out = await server.romm_streaming_audio("ps2")
+    assert calls[0]["path"] == "streaming/sessions/ps2/mute"
+    assert calls[0]["json"] == {}
+    assert "mute is now True" in out
+
+
+async def test_streaming_audio_rejects_out_of_range_volume(modern, calls):
+    out = await server.romm_streaming_audio("ps2", volume=150)
+    assert "between 0 and 100" in out
+    assert not calls
+
+
+async def test_streaming_stop_saves_by_default(modern, calls):
+    calls.responses.append({"saved": True})
+    out = await server.romm_streaming_stop("ps2")
+    assert calls[0]["path"] == "streaming/sessions/ps2/save-and-exit"
+    assert calls[0]["json"] == {"slot": 0, "wait": True}
+    assert "state saved" in out
+
+
+async def test_streaming_stop_flags_unconfirmed_save(modern, calls):
+    """A save the emulator didn't confirm must not read as a clean stop."""
+    calls.responses.append({"saved": False})
+    out = await server.romm_streaming_stop("ps2")
+    assert "did NOT confirm a save" in out
+
+
+async def test_streaming_stop_without_saving_uses_delete(modern, calls):
+    calls.responses.append({"status": "released"})
+    out = await server.romm_streaming_stop("ps2", save_first=False)
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["path"] == "streaming/sessions/ps2"
+    assert "without saving" in out
+
+
+async def test_streaming_sessions_explains_admin_only(modern, monkeypatch):
+    async def boom(*a, **k):
+        raise RuntimeError("API error 403: Forbidden")
+    monkeypatch.setattr(server, "_request", boom)
+    out = await server.romm_streaming_sessions()
+    assert "admin-only" in out
+
+
+async def test_random_rom_passes_scope_filters(modern, calls):
+    calls.responses.append({"id": 3, "name": "Ico", "platform_slug": "ps2"})
+    out = await server.romm_random_rom(platform_id=7, collection_id=2)
+    assert calls[0]["path"] == "roms/random"
+    assert calls[0]["params"] == {"platform_ids": 7, "collection_id": 2}
+    assert "Ico" in out
+
+
+async def test_random_rom_handles_empty_scope(modern, calls):
+    calls.responses.append({})
+    out = await server.romm_random_rom(platform_id=99)
+    assert "No ROM matched" in out
+
+
+async def test_platform_folders_reports_none_clearly(modern, calls):
+    calls.responses.append([])
+    out = await server.romm_platform_folders()
+    assert "No unscanned platform folders" in out
+
+
+async def test_platform_folders_lists_unscanned(modern, calls):
+    calls.responses.append([{"name": "Dreamcast", "fs_slug": "dc", "slug": "dc"}])
+    out = await server.romm_platform_folders()
+    assert "Dreamcast" in out
+    assert "romm_scan_library" in out
+
+
+# ── Tool annotations ─────────────────────────────────────────────────────
+
+
+async def test_every_tool_carries_annotations():
+    tools = await server.mcp._list_tools()
+    bare = [t.name for t in tools
+            if t.annotations is None or t.annotations.readOnlyHint is None]
+    assert bare == []
+
+
+async def test_deleting_tools_are_marked_destructive():
+    tools = {t.name: t.annotations for t in await server.mcp._list_tools()}
+    for name in ("romm_delete_note", "romm_delete_collection",
+                 "romm_delete_play_session", "romm_delete_smart_collection",
+                 "romm_delete_music_playlist", "romm_streaming_stop"):
+        assert tools[name].destructiveHint is True, name
+
+
+async def test_read_tools_are_not_marked_writable():
+    tools = {t.name: t.annotations for t in await server.mcp._list_tools()}
+    for name in ("romm_search", "romm_music_tracks", "romm_random_rom",
+                 "romm_streaming_config", "romm_platform_folders"):
+        assert tools[name].readOnlyHint is True, name

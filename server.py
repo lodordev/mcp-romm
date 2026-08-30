@@ -1,59 +1,58 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 40 tools: 26 read-only for browsing, searching, and viewing metadata,
-plus 14 write tools for play status, play sessions, favorites, notes, and
-collections (regular and smart). Targets RomM 5.0+; most read tools degrade
-gracefully on 4.4+ (tools marked "RomM 5.0+" need 5.0).
+Provides 58 tools: 34 read-only for browsing, searching, and viewing metadata,
+plus 24 write tools for play status, play sessions, favorites, notes,
+collections (regular and smart), soundtrack favourites and playlists, and
+emulator-streaming sessions.
 
-Write tools change only your own user data (play status, favorites, notes) and
-your own collections. No tool modifies ROM files, platforms, firmware, other
-users, or uploads/deletes save files. OAuth2 password grant with automatic
-token refresh and 401 retry.
+Targets RomM 5.0-5.2. Newer features are version-gated against /api/heartbeat
+and say so rather than 404-ing: music favourites/playlists, emulator streaming
+and unscanned-platform-folder listing need 5.1+; the random ROM pick needs
+5.2+. Most other read tools still degrade gracefully on 4.4+.
 
-Tools:
-  romm_status              — Check server configuration and reachability
-  romm_platforms           — List platforms with ROM counts and sizes
-  romm_library_items       — Browse ROMs with filtering and pagination
-  romm_recent              — Recently added or updated ROMs
-  romm_get_item            — Full ROM detail (metadata, saves, user status)
-  romm_search              — Search ROMs by name
-  romm_search_by_hash      — Identify a ROM by file hash (MD5, SHA1, CRC, or RetroAchievements)
-  romm_stats               — Library-wide statistics
-  romm_collections         — List user-curated collections
-  romm_collection_detail   — List ROMs in a specific collection
-  romm_smart_collections   — List auto-generated smart collections
-  romm_saves               — List save files by ROM or platform
-  romm_user_profile        — Browse by user status (now playing, backlog, etc.)
-  romm_firmware            — List BIOS/firmware files per platform
-  romm_devices             — List registered devices
-  romm_rom_notes           — View notes on a ROM
-  romm_filters             — Available filter values (genres, regions, etc.)
-  romm_tasks               — Task registry + running task status
-  romm_scan_library        — Trigger a background library rescan
-  romm_activity            — Recent play activity feed (RomM 5.0+)
-  romm_play_sessions       — List recorded play sessions (RomM 5.0+)
-  romm_virtual_collections — Automatic metadata groupings (RomM 5.0+)
-  romm_virtual_collection_detail — List ROMs in a virtual collection
-  romm_smart_collection_detail — Smart collection rules + matching ROMs
-  romm_whoami              — Authenticated account, role, and permissions
-  romm_metadata_search     — Search metadata providers for ROM matches
+Write tools change only your own user data (play status, favorites, notes,
+music favourites/playlists) and your own collections. No tool modifies ROM
+files, platforms, firmware, other users, or uploads/deletes RomM save files.
+The one exception to "changes nothing outside your account" is emulator
+streaming, which starts and stops a server-side emulator container and can
+write that emulator's own save states — it is annotated accordingly.
 
-Write tools (modify your user data and collections):
-  romm_set_status          — Set play status, backlog, now-playing, rating, completion
-  romm_favorite            — Add or remove a ROM from your favorites
-  romm_log_play_session    — Record a play session (RomM 5.0+)
-  romm_delete_play_session — Delete a play session (permanent)
-  romm_add_note            — Add a note to a ROM
-  romm_update_note         — Edit an existing note
-  romm_delete_note         — Delete a note (permanent)
-  romm_create_collection   — Create a new collection
-  romm_add_to_collection   — Add ROMs to a collection
-  romm_remove_from_collection — Remove ROMs from a collection
-  romm_delete_collection   — Delete a collection (permanent)
-  romm_create_smart_collection — Create a smart collection (saved filter)
-  romm_update_smart_collection — Edit a smart collection
-  romm_delete_smart_collection — Delete a smart collection (permanent)
+Every tool carries MCP annotations (readOnlyHint / destructiveHint /
+idempotentHint) so clients can tell a browse from a delete without guessing.
+
+Auth is an OAuth2 password grant with automatic token refresh and 401 retry.
+Scopes are negotiated, not assumed: RomM rejects an entire token request with
+403 when any requested scope is outside the account's set, so optional tiers
+(tasks.run, and the 5.1-only playlists.*) are probed once and dropped if
+refused, instead of taking every tool down with them.
+
+Tool groups:
+  Library        romm_status, romm_stats, romm_platforms, romm_library_items,
+                 romm_recent, romm_get_item, romm_search, romm_search_by_hash,
+                 romm_filters, romm_random_rom, romm_platform_folders
+  Collections    romm_collections, romm_collection_detail,
+                 romm_smart_collections, romm_smart_collection_detail,
+                 romm_virtual_collections, romm_virtual_collection_detail,
+                 romm_create_collection, romm_add_to_collection,
+                 romm_remove_from_collection, romm_delete_collection,
+                 romm_create_smart_collection, romm_update_smart_collection,
+                 romm_delete_smart_collection
+  Play data      romm_user_profile, romm_activity, romm_play_sessions,
+                 romm_set_status, romm_favorite, romm_log_play_session,
+                 romm_delete_play_session
+  Notes          romm_rom_notes, romm_add_note, romm_update_note,
+                 romm_delete_note
+  Files & system romm_saves, romm_firmware, romm_devices, romm_tasks,
+                 romm_scan_library, romm_whoami, romm_metadata_search
+  Soundtracks    romm_music_tracks, romm_music_facets, romm_music_favorites,
+                 romm_music_favorite, romm_music_playlists,
+                 romm_music_playlist, romm_create_music_playlist,
+                 romm_update_music_playlist, romm_delete_music_playlist,
+                 romm_music_playlist_tracks
+  Streaming      romm_streaming_config, romm_streaming_sessions,
+                 romm_streaming_start, romm_streaming_state,
+                 romm_streaming_audio, romm_streaming_stop
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
@@ -68,12 +67,18 @@ Environment variables:
   ROMM_MCP_PORT         — Port for http transport (default: 8765)
 
 Security:
-  - Least privilege: the OAuth2 token requests only read scopes plus
-    roms.user.write, collections.write, and tasks.run — exactly what the tools
-    do. It cannot modify ROM files, platforms, firmware, or other users, and it
-    cannot touch save files.
-  - Write tools that permanently destroy data (romm_delete_note,
-    romm_delete_collection) are clearly labeled as such.
+  - Least privilege: the token requests read scopes plus roms.user.write,
+    collections.write, and the two optional tiers (tasks.run, playlists.*).
+    It cannot modify ROM files, platforms, firmware, or other users, and it
+    cannot touch RomM save files.
+  - Tools that permanently destroy data (romm_delete_note,
+    romm_delete_collection, romm_delete_smart_collection,
+    romm_delete_play_session, romm_delete_music_playlist) are labeled and
+    carry destructiveHint. So does romm_streaming_stop, which kills a
+    running emulator.
+  - Deliberately NOT implemented, though RomM 5.1 exposes them: ROM-file
+    deletion (DELETE /roms/{id}/files/{id}) and scan-config writes
+    (PUT /config/scan). Both sit outside this server's boundary.
   - Credentials are held in memory only, never written to disk.
   - TLS verification is enabled by default.
 """
@@ -128,6 +133,22 @@ class Config:
 cfg = Config.from_env()
 mcp = FastMCP("romm")
 
+# MCP tool annotations — hints a client uses to decide what needs confirming.
+# openWorldHint is true throughout: every tool talks to a remote RomM instance.
+_READ_ONLY = {"readOnlyHint": True, "openWorldHint": True}
+_WRITE = {
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": True,
+}
+_IDEMPOTENT_WRITE = {
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": True,
+}
+_DESTRUCTIVE = {
+    "readOnlyHint": False, "destructiveHint": True,
+    "idempotentHint": False, "openWorldHint": True,
+}
+
 
 # ── OAuth2 token management ─────────────────────────────────────────────
 
@@ -143,20 +164,58 @@ _token = _TokenState()
 
 # Least privilege: every read scope the read tools need, plus the two write
 # scopes the write tools actually use (roms.user.write for status/favorites/
-# notes, collections.write for collections) and tasks.run for the rescan.
+# notes, collections.write for collections).
 # Deliberately NOT requested: roms.write, platforms.write, firmware.write,
 # assets.write, users.write, me.write, devices.write — no tool uses them.
-_DEFAULT_SCOPES = (
-    "me.read "
-    "roms.read "
-    "roms.user.read roms.user.write "
-    "platforms.read "
-    "assets.read "
-    "devices.read "
-    "firmware.read "
-    "collections.read collections.write "
-    "tasks.run"
+_CORE_SCOPES: tuple[str, ...] = (
+    "me.read",
+    "roms.read",
+    "roms.user.read", "roms.user.write",
+    "platforms.read",
+    "assets.read",
+    "devices.read",
+    "firmware.read",
+    "collections.read", "collections.write",
 )
+
+# Scopes a server or account may legitimately not have. RomM's token endpoint
+# rejects the WHOLE request with 403 "Insufficient scope" when any requested
+# scope is outside the user's set (backend/endpoints/auth.py) — so asking for
+# playlists.* on a 5.0 server, or tasks.run as a least-privilege user, would
+# take down every tool rather than just the ones that need it. These are
+# negotiated away instead: each tier is probed once and dropped if refused.
+_OPTIONAL_SCOPE_TIERS: dict[str, tuple[str, ...]] = {
+    # Admin-tier in RomM's scope map; a scoped service account often lacks it.
+    "tasks": ("tasks.run",),
+    # RomM 5.1+ only — the scope does not exist on 5.0.
+    "playlists": ("playlists.read", "playlists.write"),
+}
+
+# The full set we'd like, in canonical order. Kept as a single string because
+# that is what the OAuth form field takes.
+_DEFAULT_SCOPES = " ".join(
+    _CORE_SCOPES + tuple(s for tier in _OPTIONAL_SCOPE_TIERS.values() for s in tier)
+)
+
+
+@dataclass
+class _ScopeState:
+    """What the server actually granted, resolved once per process."""
+
+    negotiated: bool = False
+    granted: tuple[str, ...] = ()
+    dropped_tiers: tuple[str, ...] = ()
+
+    @property
+    def scope_string(self) -> str:
+        return " ".join(self.granted) if self.granted else _DEFAULT_SCOPES
+
+    def has(self, tier: str) -> bool:
+        """True unless negotiation proved the tier unavailable."""
+        return tier not in self.dropped_tiers
+
+
+_scopes = _ScopeState()
 
 _clients: dict[str, httpx.AsyncClient] = {}
 
@@ -169,6 +228,68 @@ def _get_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         )
     return _clients[cfg.romm_url]
+
+
+async def _password_grant(scope: str) -> httpx.Response:
+    return await _get_client().post(
+        f"{cfg.romm_url}/api/token",
+        data={
+            "grant_type": "password",
+            "username": cfg.romm_username,
+            "password": cfg.romm_password,
+            "scope": scope,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+
+async def _negotiate_scopes() -> httpx.Response:
+    """Find the largest scope set this server and account will actually grant.
+
+    RomM answers an over-broad request with a single 403 for the whole token,
+    so the only way to learn which optional tiers are available is to ask.
+    Runs once per process; the result is cached in `_scopes` and reused for
+    every later refresh, so token expiry does not re-run the probe.
+
+    Returns the successful token response.
+    """
+    candidates = " ".join(
+        _CORE_SCOPES + tuple(s for tier in _OPTIONAL_SCOPE_TIERS.values() for s in tier)
+    )
+    resp = await _password_grant(candidates)
+    if resp.status_code != 403:
+        # 200, or a genuine failure (bad password) that dropping scopes can't fix.
+        if resp.status_code == 200:
+            _scopes.granted = tuple(candidates.split())
+            _scopes.dropped_tiers = ()
+            _scopes.negotiated = True
+        return resp
+
+    # Over-broad. Establish that the core set works before blaming a tier.
+    core = " ".join(_CORE_SCOPES)
+    core_resp = await _password_grant(core)
+    if core_resp.status_code != 200:
+        # Core itself is refused — this account is below what the tools need.
+        return core_resp
+
+    # Probe each optional tier against the core set, keeping the ones granted.
+    granted = list(_CORE_SCOPES)
+    dropped = []
+    for tier, tier_scopes in _OPTIONAL_SCOPE_TIERS.items():
+        probe = await _password_grant(core + " " + " ".join(tier_scopes))
+        if probe.status_code == 200:
+            granted.extend(tier_scopes)
+        else:
+            dropped.append(tier)
+            log.info("Scope tier %r unavailable on this server/account — dropped", tier)
+
+    _scopes.granted = tuple(granted)
+    _scopes.dropped_tiers = tuple(dropped)
+    _scopes.negotiated = True
+
+    if len(granted) == len(_CORE_SCOPES):
+        return core_resp
+    return await _password_grant(" ".join(granted))
 
 
 async def _acquire_token() -> str:
@@ -188,7 +309,7 @@ async def _acquire_token() -> str:
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": _token.refresh_token,
-                    "scope": _DEFAULT_SCOPES,
+                    "scope": _scopes.scope_string,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -200,18 +321,18 @@ async def _acquire_token() -> str:
         except Exception:
             log.debug("Token refresh failed, falling back to password grant")
 
-    # Password grant
+    # Password grant. The first one negotiates; later ones reuse the result,
+    # and a 403 on a previously-working set means grants changed under us, so
+    # negotiate again rather than staying broken until restart.
     try:
-        resp = await client.post(
-            f"{cfg.romm_url}/api/token",
-            data={
-                "grant_type": "password",
-                "username": cfg.romm_username,
-                "password": cfg.romm_password,
-                "scope": _DEFAULT_SCOPES,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+        if not _scopes.negotiated:
+            resp = await _negotiate_scopes()
+        else:
+            resp = await _password_grant(_scopes.scope_string)
+            if resp.status_code == 403:
+                _scopes.negotiated = False
+                resp = await _negotiate_scopes()
+
         resp.raise_for_status()
         data = resp.json()
         _token.access_token = data["access_token"]
@@ -303,6 +424,91 @@ async def _delete(path: str, body: dict | None = None) -> dict | list:
     return await _request("DELETE", path, json=body)
 
 
+# ── Server version & capability gate ─────────────────────────────────────
+
+# Minimum RomM version per feature cluster, taken from the tagged source:
+# music favourites/playlists, emulator streaming and /platforms/filesystem
+# arrived in 5.1.0; /roms/random in 5.2.0.
+_V_5_1 = (5, 1, 0)
+_V_5_2 = (5, 2, 0)
+
+
+@dataclass
+class _VersionState:
+    checked: bool = False
+    raw: str = ""
+    parsed: tuple[int, int, int] | None = None
+
+
+_version = _VersionState()
+
+
+def _parse_version(raw: str) -> tuple[int, int, int] | None:
+    """Parse "5.2.0", "v5.1.0", "5.1.0-beta.2" into a comparable triple.
+
+    A pre-release sorts as its base version: 5.1.0-beta.2 already carries the
+    5.1 endpoints, which is what the gate is actually asking about.
+    """
+    core = raw.strip().lstrip("vV").split("-")[0].split("+")[0]
+    parts = core.split(".")[:3]
+    if not parts or not parts[0].isdigit():
+        return None
+    nums = [int(p) if p.isdigit() else 0 for p in parts]
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2])
+
+
+async def _server_version() -> tuple[int, int, int] | None:
+    """The RomM version from /api/heartbeat, cached. None if it can't be read.
+
+    Unauthenticated on purpose — the gate must work even when auth is the
+    thing that's broken.
+    """
+    if _version.checked:
+        return _version.parsed
+    _version.checked = True
+    try:
+        data = await _get("heartbeat", auth_required=False)
+        if isinstance(data, dict):
+            raw = str((data.get("SYSTEM") or {}).get("VERSION", ""))
+            _version.raw = raw
+            _version.parsed = _parse_version(raw)
+    except Exception as e:
+        log.debug("Could not read server version: %s", e)
+    return _version.parsed
+
+
+def _fmt_version(v: tuple[int, int, int]) -> str:
+    return ".".join(str(p) for p in v)
+
+
+async def _version_gate(minimum: tuple[int, int, int], feature: str) -> str | None:
+    """An explanatory message when the server is too old, else None.
+
+    Fails open: if the version can't be read we let the call through and let
+    RomM's own 404 be the answer, rather than refusing on a guess.
+    """
+    ver = await _server_version()
+    if ver is not None and ver < minimum:
+        return (f"{feature} needs RomM {_fmt_version(minimum)} or newer — "
+                f"this server reports {_version.raw or 'an unknown version'}.")
+    return None
+
+
+def _scope_gate(tier: str, feature: str) -> str | None:
+    """An explanatory message when a negotiated-away scope blocks a feature.
+
+    Only speaks once negotiation has actually run; before that it stays quiet
+    so the first call isn't refused on stale state.
+    """
+    if _scopes.negotiated and not _scopes.has(tier):
+        return (f"{feature} needs the {tier} scope, which this server or "
+                f"account did not grant. Grant it in RomM and restart the "
+                f"MCP server.")
+    return None
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -351,7 +557,7 @@ def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
 # ── Tools — Status & Stats ──────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_status() -> str:
     """Check RomM MCP server configuration and reachability."""
     lines = ["RomM MCP Status:\n"]
@@ -371,22 +577,51 @@ async def romm_status() -> str:
             meta = data.get("METADATA_SOURCES", {})
             fs = data.get("FILESYSTEM", {})
 
+            raw_version = str(system.get("VERSION", "?"))
             lines.append("  Connected: yes")
-            lines.append(f"  Version: {system.get('VERSION', '?')}")
+            lines.append(f"  Version: {raw_version}")
             lines.append(f"  IGDB enabled: {meta.get('IGDB_API_ENABLED', False)}")
             lines.append(f"  ScreenScraper enabled: {meta.get('SS_API_ENABLED', False)}")
             lines.append(f"  HLTB enabled: {meta.get('HLTB_API_ENABLED', False)}")
             platforms = fs.get("FS_PLATFORMS", [])
             lines.append(f"  Filesystem platforms: {len(platforms)}")
+
+            # Feature gate — which tool clusters this server can actually serve.
+            ver = _parse_version(raw_version)
+            _version.checked, _version.raw, _version.parsed = True, raw_version, ver
+            lines.append("\n  Capabilities:")
+            if ver is None:
+                lines.append("    Version unreadable — version-gated tools will "
+                             "be attempted and may return 404.")
+            else:
+                def mark(ok: bool) -> str:
+                    return "yes" if ok else "no"
+                lines.append(f"    Music favourites + playlists (5.1+): {mark(ver >= _V_5_1)}")
+                lines.append(f"    Emulator streaming (5.1+):           {mark(ver >= _V_5_1)}")
+                lines.append(f"    Unscanned platform folders (5.1+):   {mark(ver >= _V_5_1)}")
+                lines.append(f"    Random ROM pick (5.2+):              {mark(ver >= _V_5_2)}")
         else:
             lines.append("  Connected: yes (unexpected response format)")
     except Exception as e:
         lines.append(f"  Status: UNREACHABLE — {e}")
 
+    # Scope negotiation result — "not yet negotiated" is honest, not a failure.
+    lines.append("\n  Scopes:")
+    if not _scopes.negotiated:
+        lines.append("    Not yet negotiated (happens on the first authenticated call).")
+    else:
+        lines.append(f"    Granted ({len(_scopes.granted)}): {' '.join(_scopes.granted)}")
+        if _scopes.dropped_tiers:
+            lines.append(f"    Dropped: {', '.join(_scopes.dropped_tiers)} — "
+                         f"the server or account would not grant these; tools "
+                         f"needing them will say so.")
+        else:
+            lines.append("    Dropped: none")
+
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_stats() -> str:
     """Get library statistics — platform count, ROM count, saves, total size."""
     data = await _get("stats")
@@ -410,7 +645,7 @@ async def romm_stats() -> str:
 # ── Tools — Platforms ────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_platforms() -> str:
     """List platforms with ROM counts."""
     data = await _get("platforms")
@@ -442,7 +677,7 @@ async def romm_platforms() -> str:
 # ── Tools — ROM Browsing & Search ────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_library_items(
     platform_id: int = 0,
     search: str = "",
@@ -501,7 +736,7 @@ async def romm_library_items(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_recent(limit: int = 20) -> str:
     """Recently added or updated ROMs.
 
@@ -542,7 +777,7 @@ async def romm_recent(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_get_item(rom_id: int) -> str:
     """Get full detail for a single ROM — metadata, user status, saves.
 
@@ -643,7 +878,7 @@ async def romm_get_item(rom_id: int) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_search(query: str, platform_id: int = 0, limit: int = 20) -> str:
     """Search ROMs by name across the library.
 
@@ -691,7 +926,7 @@ async def romm_search(query: str, platform_id: int = 0, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_search_by_hash(
     crc_hash: str = "",
     md5_hash: str = "",
@@ -737,7 +972,7 @@ async def romm_search_by_hash(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_filters() -> str:
     """Get available filter values for ROM browsing — genres, regions, languages, tags."""
     data = await _get("roms/filters", long_timeout=True)
@@ -765,7 +1000,7 @@ async def romm_filters() -> str:
 # ── Tools — Collections ─────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_collections() -> str:
     """List user-curated collections."""
     data = await _get("collections")
@@ -796,7 +1031,7 @@ async def romm_collections() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_collection_detail(collection_id: int) -> str:
     """List ROMs in a specific collection.
 
@@ -852,7 +1087,7 @@ async def romm_collection_detail(collection_id: int) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_smart_collections() -> str:
     """List auto-generated smart collections (rule-based)."""
     data = await _get("collections/smart")
@@ -887,7 +1122,7 @@ async def romm_smart_collections() -> str:
 # ── Tools — Saves & User Status ──────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
     """List save files. Filter by ROM or platform.
 
@@ -945,7 +1180,7 @@ async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_user_profile(status_filter: str = "") -> str:
     """Browse ROMs by user status — favorites, now playing, backlogged, completed.
 
@@ -989,7 +1224,7 @@ async def romm_user_profile(status_filter: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_rom_notes(rom_id: int) -> str:
     """View notes on a ROM.
 
@@ -1036,7 +1271,7 @@ async def romm_rom_notes(rom_id: int) -> str:
 # ── Tools — Firmware & Devices ───────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_firmware(platform_id: int = 0) -> str:
     """List BIOS/firmware files. Optionally filter by platform.
 
@@ -1073,7 +1308,7 @@ async def romm_firmware(platform_id: int = 0) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_devices() -> str:
     """List registered devices (handhelds, emulators, etc.)."""
     data = await _get("devices")
@@ -1109,7 +1344,7 @@ async def romm_devices() -> str:
 # ── Tools — Tasks ────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_tasks() -> str:
     """List registered tasks (schedule, manual-run availability) and running task status."""
     lines: list[str] = []
@@ -1171,7 +1406,7 @@ async def romm_tasks() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def romm_scan_library() -> str:
     """Trigger a library rescan to discover new ROMs and platforms.
 
@@ -1208,7 +1443,7 @@ async def romm_scan_library() -> str:
 _VALID_STATUSES = ("incomplete", "finished", "completed_100", "retired", "never_playing")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_set_status(
     rom_id: int,
     status: str = "",
@@ -1298,7 +1533,7 @@ async def _favorite_collection() -> dict | None:
     return None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_favorite(rom_id: int, favorite: bool = True) -> str:
     """Add or remove a ROM from your Favorites.
 
@@ -1333,7 +1568,7 @@ async def romm_favorite(rom_id: int, favorite: bool = True) -> str:
 # ── Tools — Write: notes ─────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def romm_add_note(
     rom_id: int,
     title: str,
@@ -1362,7 +1597,7 @@ async def romm_add_note(
     return f"Added note to ROM {rom_id} (note id: {note_id})."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_update_note(
     rom_id: int,
     note_id: int,
@@ -1397,7 +1632,7 @@ async def romm_update_note(
     return f"Updated note {note_id} on ROM {rom_id}."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 async def romm_delete_note(rom_id: int, note_id: int) -> str:
     """Permanently delete a note. This cannot be undone.
 
@@ -1411,7 +1646,7 @@ async def romm_delete_note(rom_id: int, note_id: int) -> str:
 # ── Tools — Write: collections ───────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def romm_create_collection(name: str, description: str = "") -> str:
     """Create a new user collection.
 
@@ -1426,7 +1661,7 @@ async def romm_create_collection(name: str, description: str = "") -> str:
     return f"Created collection \"{name}\"."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_add_to_collection(collection_id: int, rom_ids: list[int]) -> str:
     """Add one or more ROMs to a collection (without replacing the existing list).
 
@@ -1441,7 +1676,7 @@ async def romm_add_to_collection(collection_id: int, rom_ids: list[int]) -> str:
     return f"Added {len(rom_ids)} ROM(s) to collection {collection_id}.{suffix}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_remove_from_collection(collection_id: int, rom_ids: list[int]) -> str:
     """Remove one or more ROMs from a collection (without deleting the collection).
 
@@ -1456,7 +1691,7 @@ async def romm_remove_from_collection(collection_id: int, rom_ids: list[int]) ->
     return f"Removed {len(rom_ids)} ROM(s) from collection {collection_id}.{suffix}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 async def romm_delete_collection(collection_id: int) -> str:
     """Permanently delete a collection. This cannot be undone.
 
@@ -1471,7 +1706,7 @@ async def romm_delete_collection(collection_id: int) -> str:
 # ── Tools — Activity & Play Sessions (RomM 5.0+) ─────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_activity(rom_id: int = 0, limit: int = 20) -> str:
     """Recent play activity feed — who started playing what, when (RomM 5.0+).
 
@@ -1502,7 +1737,7 @@ async def romm_activity(rom_id: int = 0, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_play_sessions(rom_id: int = 0, limit: int = 20) -> str:
     """List your recorded play sessions — start time and duration (RomM 5.0+).
 
@@ -1534,7 +1769,7 @@ async def romm_play_sessions(rom_id: int = 0, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def romm_log_play_session(rom_id: int, duration_minutes: int,
                                 ended_minutes_ago: int = 0) -> str:
     """Record a play session on a ROM (RomM 5.0+). Logs to your own history.
@@ -1561,7 +1796,7 @@ async def romm_log_play_session(rom_id: int, duration_minutes: int,
             f"(ended {end.strftime('%Y-%m-%d %H:%M UTC')}).")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 async def romm_delete_play_session(session_id: int) -> str:
     """Permanently delete one of your play sessions. This cannot be undone.
 
@@ -1574,7 +1809,7 @@ async def romm_delete_play_session(session_id: int) -> str:
 # ── Tools — Virtual & Smart Collections (RomM 5.0+) ──────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_virtual_collections(collection_type: str = "collection",
                                    limit: int = 50) -> str:
     """List virtual collections — automatic groupings from metadata (RomM 5.0+).
@@ -1601,7 +1836,7 @@ async def romm_virtual_collections(collection_type: str = "collection",
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_virtual_collection_detail(virtual_id: str) -> str:
     """List ROMs in a virtual collection.
 
@@ -1638,7 +1873,7 @@ async def romm_virtual_collection_detail(virtual_id: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_smart_collection_detail(collection_id: int) -> str:
     """Show a smart collection's filter rules and matching ROMs.
 
@@ -1707,7 +1942,7 @@ def _validate_smart_criteria(criteria: dict | None) -> str | None:
     return None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def romm_create_smart_collection(name: str, description: str = "",
                                        filter_criteria: dict | None = None,
                                        is_public: bool = False) -> str:
@@ -1740,7 +1975,7 @@ async def romm_create_smart_collection(name: str, description: str = "",
     return f"Created smart collection \"{name}\"."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def romm_update_smart_collection(collection_id: int, name: str = "",
                                        description: str = "",
                                        filter_criteria: dict | None = None,
@@ -1773,7 +2008,7 @@ async def romm_update_smart_collection(collection_id: int, name: str = "",
     return f"Updated smart collection {collection_id}."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 async def romm_delete_smart_collection(collection_id: int) -> str:
     """Permanently delete a smart collection. This cannot be undone.
 
@@ -1788,7 +2023,7 @@ async def romm_delete_smart_collection(collection_id: int) -> str:
 # ── Tools — Identity & Metadata (RomM 5.0+) ──────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_whoami() -> str:
     """Show the authenticated account — identity, role, and effective permissions."""
     me = await _get("users/me")
@@ -1838,7 +2073,7 @@ async def romm_whoami() -> str:
     return "\n".join(lines) if lines else "Could not read account info."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def romm_metadata_search(rom_id: int, search_term: str = "",
                                search_by: str = "name") -> str:
     """Search metadata providers (IGDB, MobyGames, ...) for matches for a ROM.
@@ -1875,6 +2110,674 @@ async def romm_metadata_search(rom_id: int, search_term: str = "",
     if len(data) > 20:
         lines.append(f"\n  ({len(data) - 20} more not shown)")
 
+    return "\n".join(lines)
+
+
+# ── Tools — Soundtracks & Music (RomM 5.0+ / 5.1+) ───────────────────────
+
+
+def _fmt_duration(seconds: float | int | None) -> str:
+    if not seconds:
+        return ""
+    total = int(seconds)
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _fmt_track_line(t: dict, index: int = 0) -> str:
+    """One display line for a music track. Shared by tracks/favorites/playlists."""
+    title = t.get("title") or "(untitled)"
+    bits = []
+    if t.get("artist"):
+        bits.append(str(t["artist"]))
+    if t.get("album"):
+        bits.append(str(t["album"]))
+    if t.get("year"):
+        bits.append(str(t["year"]))
+    dur = _fmt_duration(t.get("duration_seconds"))
+    if dur:
+        bits.append(dur)
+
+    line = f"{index}. {title}" if index else f"  {title}"
+    if bits:
+        line += f" — {' · '.join(bits)}"
+    if t.get("is_favorite"):
+        line += " *"
+    game = t.get("game_name")
+    platform = t.get("platform_name")
+    if game:
+        line += f"\n     from: {game}" + (f" [{platform}]" if platform else "")
+    line += f"\n     track file id: {t.get('rom_file_id', '?')}"
+    return line
+
+
+def _music_filter_params(search: str, artist: str, album: str, genre: str,
+                         platform_id: int, year: int, order_by: str,
+                         order_dir: str, limit: int, offset: int) -> dict:
+    params: dict = {
+        "order_by": order_by, "order_dir": order_dir,
+        "limit": min(max(limit, 1), 200), "offset": max(offset, 0),
+    }
+    if search:
+        params["search"] = search
+    if artist:
+        params["artist"] = artist
+    if album:
+        params["album"] = album
+    if genre:
+        params["genre"] = genre
+    if platform_id:
+        params["platform_ids"] = platform_id
+    if year:
+        params["year"] = year
+    return params
+
+
+def _fmt_track_page(data: dict | list, heading: str, offset: int, empty: str) -> str:
+    items = data.get("items", []) if isinstance(data, dict) else data
+    total = data.get("total") if isinstance(data, dict) else None
+    if not items:
+        return empty
+    header = (f"{heading} (offset {offset}, showing {len(items)} of {total}):\n"
+              if total is not None
+              else f"{heading} (offset {offset}, showing {len(items)}):\n")
+    lines = [header]
+    for i, t in enumerate(items, 1):
+        lines.append(_fmt_track_line(t, index=i + offset))
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_tracks(search: str = "", artist: str = "", album: str = "",
+                            genre: str = "", platform_id: int = 0, rom_id: int = 0,
+                            year: int = 0, order_by: str = "title",
+                            order_dir: str = "asc", limit: int = 25,
+                            offset: int = 0) -> str:
+    """Browse the soundtrack library — game music tracks, filterable and paginated.
+
+    These are audio tracks RomM extracted from soundtrack files, not ROMs.
+
+    search: Substring match on title, artist, or album.
+    artist / album / genre: Exact match filters.
+    platform_id: Restrict to one platform (use romm_platforms for IDs). 0 = all.
+    rom_id: Restrict to one game's tracks. 0 = all.
+    year: Exact release year. 0 = any.
+    order_by: title, artist, album, duration, year, platform, added (default: title).
+    order_dir: "asc" or "desc".
+    limit: Items per page (default 25, max 200).
+    offset: Skip this many items.
+    """
+    params = _music_filter_params(search, artist, album, genre, platform_id,
+                                  year, order_by, order_dir, limit, offset)
+    if rom_id:
+        params["rom_id"] = rom_id
+    data = await _get("music/tracks", params=params, long_timeout=True)
+    return _fmt_track_page(data, "Soundtrack tracks", params["offset"],
+                           "No soundtrack tracks found.")
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_facets(field: str = "artists", search: str = "",
+                            limit: int = 30, offset: int = 0) -> str:
+    """List distinct soundtrack artists, albums, genres, or years with track counts.
+
+    Use this to see what's in the soundtrack library before filtering
+    romm_music_tracks by an exact artist/album/genre/year.
+
+    field: "artists" (default), "albums", "genres", or "years".
+    search: Typeahead substring on the value.
+    limit: Values to return (default 30, max 200).
+    offset: Skip this many values.
+    """
+    field = field.strip().lower()
+    valid = {"artists", "albums", "genres", "years"}
+    if field not in valid:
+        return f"field must be one of: {', '.join(sorted(valid))}."
+
+    params: dict = {"limit": min(max(limit, 1), 200), "offset": max(offset, 0),
+                    "order_by": "count", "order_dir": "desc"}
+    if search:
+        params["search"] = search
+    data = await _get(f"music/{field}", params=params)
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    total = data.get("total") if isinstance(data, dict) else None
+    if not items:
+        return f"No {field} found."
+
+    lines = [f"Soundtrack {field}"
+             + (f" ({len(items)} of {total})" if total is not None else "") + ":\n"]
+    for v in items:
+        lines.append(f"  {v.get('value', '?')} — {v.get('count', 0)} track(s)")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_favorites(search: str = "", artist: str = "", album: str = "",
+                               genre: str = "", platform_id: int = 0, year: int = 0,
+                               order_by: str = "title", order_dir: str = "asc",
+                               limit: int = 25, offset: int = 0) -> str:
+    """List your favourite soundtrack tracks (RomM 5.1+).
+
+    Same filters and shape as romm_music_tracks, restricted to your favourites.
+    """
+    gate = await _version_gate(_V_5_1, "Music favourites")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music favourites")
+    if gate:
+        return gate
+
+    params = _music_filter_params(search, artist, album, genre, platform_id,
+                                  year, order_by, order_dir, limit, offset)
+    data = await _get("music/favorites", params=params)
+    return _fmt_track_page(data, "Favourite tracks", params["offset"],
+                           "No favourite tracks yet.")
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_music_favorite(rom_file_ids: list[int], action: str = "add") -> str:
+    """Add or remove soundtrack tracks from your favourites (RomM 5.1+).
+
+    Changes only your own favourites; no audio file is touched.
+
+    rom_file_ids: Track file IDs (the "track file id" from romm_music_tracks).
+    action: "add" (default) or "remove".
+    """
+    gate = await _version_gate(_V_5_1, "Music favourites")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music favourites")
+    if gate:
+        return gate
+
+    action = action.strip().lower()
+    if action not in ("add", "remove"):
+        return 'action must be "add" or "remove".'
+    if not rom_file_ids:
+        return "rom_file_ids is required — pass at least one track file ID."
+
+    body = {"rom_file_ids": rom_file_ids}
+    if action == "add":
+        data = await _post("music/favorites", body)
+        n = data.get("added") if isinstance(data, dict) else None
+        return f"Added {n if n is not None else len(rom_file_ids)} track(s) to favourites."
+    data = await _delete("music/favorites", body)
+    n = data.get("removed") if isinstance(data, dict) else None
+    return f"Removed {n if n is not None else len(rom_file_ids)} track(s) from favourites."
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_playlists() -> str:
+    """List music playlists — yours plus other users' public ones (RomM 5.1+)."""
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+
+    data = await _get("music/playlists")
+    items = data if isinstance(data, list) else data.get("items", [])
+    if not items:
+        return "No music playlists."
+
+    lines = [f"Music playlists ({len(items)}):\n"]
+    for p in items:
+        line = f"  {p.get('name', '?')} — {p.get('track_count', 0)} track(s)"
+        if p.get("is_public"):
+            line += " [public]"
+        owner = p.get("owner_username")
+        if owner:
+            line += f" · by {owner}"
+        lines.append(line)
+        if p.get("description"):
+            lines.append(f"     {str(p['description'])[:120]}")
+        lines.append(f"     ID: {p.get('id', '?')}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_playlist(playlist_id: int, order_by: str = "position",
+                              order_dir: str = "asc", limit: int = 50,
+                              offset: int = 0) -> str:
+    """Show a music playlist and its tracks, in playlist order (RomM 5.1+).
+
+    playlist_id: The playlist's ID (from romm_music_playlists).
+    order_by: position (default), title, artist, album, duration, year, platform.
+    order_dir: "asc" or "desc".
+    limit: Tracks per page (default 50, max 200).
+    offset: Skip this many tracks.
+    """
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+
+    meta = await _get(f"music/playlists/{playlist_id}")
+    lines = []
+    if isinstance(meta, dict) and meta:
+        lines.append(f"Playlist: {meta.get('name', '?')} (id {meta.get('id', playlist_id)})")
+        if meta.get("description"):
+            lines.append(f"  {meta['description']}")
+        lines.append(f"  Tracks: {meta.get('track_count', 0)} · "
+                     f"{'public' if meta.get('is_public') else 'private'} · "
+                     f"owner: {meta.get('owner_username', '?')}\n")
+
+    tracks = await _get(
+        f"music/playlists/{playlist_id}/tracks",
+        params={"order_by": order_by, "order_dir": order_dir,
+                "limit": min(max(limit, 1), 200), "offset": max(offset, 0)},
+    )
+    lines.append(_fmt_track_page(tracks, "Tracks", max(offset, 0),
+                                 "  (no tracks visible to you)"))
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_create_music_playlist(name: str, description: str = "",
+                                     is_public: bool = False) -> str:
+    """Create a music playlist (RomM 5.1+). It starts empty.
+
+    name: Playlist name (required, must be unique among yours).
+    description: Optional description.
+    is_public: Visible to other users (default false).
+    """
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+    if not name.strip():
+        return "name is required."
+
+    body: dict = {"name": name, "is_public": is_public}
+    if description:
+        body["description"] = description
+    data = await _post("music/playlists", body)
+    if isinstance(data, dict) and "id" in data:
+        return f"Created playlist \"{data.get('name', name)}\" (id: {data['id']})."
+    return f"Created playlist \"{name}\"."
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_update_music_playlist(playlist_id: int, name: str = "",
+                                     description: str = "",
+                                     is_public: bool | None = None) -> str:
+    """Edit a music playlist you own. Only the fields you provide change (RomM 5.1+).
+
+    playlist_id: The playlist's ID (from romm_music_playlists).
+    name: New name (empty = unchanged).
+    description: New description (empty = unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    """
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+
+    body: dict = {}
+    if name:
+        body["name"] = name
+    if description:
+        body["description"] = description
+    if is_public is not None:
+        body["is_public"] = is_public
+    if not body:
+        return "Nothing to update — provide a field to change."
+
+    await _put(f"music/playlists/{playlist_id}", body)
+    return f"Updated playlist {playlist_id}."
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_delete_music_playlist(playlist_id: int) -> str:
+    """Permanently delete a music playlist you own. This cannot be undone (RomM 5.1+).
+
+    Only the playlist is deleted — the tracks and their audio files are untouched.
+
+    playlist_id: The playlist's ID (from romm_music_playlists).
+    """
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+
+    await _delete(f"music/playlists/{playlist_id}")
+    return f"Deleted playlist {playlist_id}."
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_music_playlist_tracks(playlist_id: int, rom_file_ids: list[int],
+                                     action: str = "add") -> str:
+    """Add, remove, or reorder tracks in a music playlist you own (RomM 5.1+).
+
+    playlist_id: The playlist's ID (from romm_music_playlists).
+    rom_file_ids: Track file IDs (the "track file id" from romm_music_tracks).
+                  For "reorder" this is the desired order; every ID must already
+                  be in the playlist, and any track you leave out keeps its
+                  relative position after the ones you list.
+    action: "add" (default), "remove", or "reorder".
+    """
+    gate = await _version_gate(_V_5_1, "Music playlists")
+    if gate:
+        return gate
+    gate = _scope_gate("playlists", "Music playlists")
+    if gate:
+        return gate
+
+    action = action.strip().lower()
+    if action not in ("add", "remove", "reorder"):
+        return 'action must be "add", "remove", or "reorder".'
+    if not rom_file_ids:
+        return "rom_file_ids is required — pass at least one track file ID."
+
+    body = {"rom_file_ids": rom_file_ids}
+    if action == "add":
+        data = await _post(f"music/playlists/{playlist_id}/tracks", body)
+        n = data.get("added") if isinstance(data, dict) else None
+        return (f"Added {n if n is not None else len(rom_file_ids)} track(s) "
+                f"to playlist {playlist_id}.")
+    if action == "remove":
+        data = await _delete(f"music/playlists/{playlist_id}/tracks", body)
+        n = data.get("removed") if isinstance(data, dict) else None
+        return (f"Removed {n if n is not None else len(rom_file_ids)} track(s) "
+                f"from playlist {playlist_id}.")
+    await _put(f"music/playlists/{playlist_id}/tracks/order", body)
+    return f"Reordered {len(rom_file_ids)} track(s) in playlist {playlist_id}."
+
+
+# ── Tools — Emulator streaming (RomM 5.1+) ───────────────────────────────
+#
+# RomM 5.1 added server-side emulation: a native emulator runs in a separate
+# container and streams video/audio/input to a browser. These tools drive that
+# session — they do not stream anything into this MCP server.
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_config() -> str:
+    """Show emulator-streaming configuration — is it on, and which platforms (RomM 5.1+).
+
+    Also reports each platform's save-state slot capabilities, which is what
+    romm_streaming_state's `slot` argument must stay within.
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+
+    data = await _get("streaming/config")
+    if not isinstance(data, dict):
+        return "Unexpected response from the streaming config endpoint."
+    if not data.get("enabled"):
+        return ("Emulator streaming is disabled on this server "
+                "(set streaming.enabled in config.yml).")
+
+    containers = data.get("containers") or []
+    if not containers:
+        return "Emulator streaming is enabled but no containers are configured."
+
+    lines = [f"Emulator streaming: enabled, {len(containers)} container(s):\n"]
+    for c in containers:
+        caps = c.get("capabilities") or {}
+        lines.append(f"  {c.get('label') or c.get('platform', '?')} "
+                     f"— platform: {c.get('platform', '?')}")
+        lines.append(f"     Stream host: {c.get('host', '?')}")
+        slots = caps.get("max_slots", 0)
+        if slots:
+            detail = f"save slots 1-{slots}"
+            if caps.get("has_autosave"):
+                detail += f", autosave slot {caps.get('autosave_slot')} (load only)"
+            lines.append(f"     Save states: {detail}")
+        else:
+            lines.append("     Save states: not supported for this platform")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_sessions() -> str:
+    """List active emulator-streaming sessions (RomM 5.1+). Admin-only on RomM's side.
+
+    RomM restricts this debug view to admin accounts; a least-privilege service
+    account gets a clear "forbidden" back rather than data.
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+
+    try:
+        data = await _get("streaming/sessions")
+    except RuntimeError as e:
+        if "403" in str(e):
+            return ("Listing streaming sessions is admin-only in RomM, and this "
+                    "account is not an admin.")
+        raise
+
+    if not isinstance(data, dict) or not data:
+        return "No active streaming sessions."
+
+    lines = [f"Active streaming sessions ({len(data)}):\n"]
+    for key, s in data.items():
+        lines.append(f"  {s.get('rom_name', '?')}")
+        lines.append(f"     Claimed: {s.get('claimed_at', '?')} by user {s.get('user_id', '?')}")
+        lines.append(f"     Container: {key}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_streaming_start(rom_id: int) -> str:
+    """Start streaming a ROM in a server-side emulator (RomM 5.1+).
+
+    Claims the emulator container for the ROM's platform and tells it to load
+    the game. Returns the URL to open in a browser to see and play it. Fails
+    with a clear message if the container is already in use by someone else.
+
+    rom_id: The ROM to launch (use romm_search or romm_library_items to find it).
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+
+    try:
+        data = await _post("streaming/sessions", {"rom_id": rom_id}, long_timeout=True)
+    except RuntimeError as e:
+        msg = str(e)
+        if "409" in msg:
+            return f"That emulator container is already in use. RomM said: {msg}"
+        if "404" in msg:
+            return ("No streaming container is configured for that ROM's platform "
+                    "(or the ROM does not exist). Check romm_streaming_config.")
+        raise
+
+    if not isinstance(data, dict):
+        return "Streaming session started."
+    return (f"Streaming \"{data.get('rom_name', '?')}\" "
+            f"({data.get('label') or data.get('platform', '?')}).\n"
+            f"  Open: {data.get('host', '?')}\n"
+            f"  Claimed at: {data.get('claimed_at', '?')}")
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_streaming_state(platform: str, action: str = "save",
+                               slot: int = 1) -> str:
+    """Save or load an emulator save state without stopping the game (RomM 5.1+).
+
+    Writes to the emulator's own state slots — this is separate from RomM's
+    battery-save files and does not touch them.
+
+    platform: Platform slug of the running session (e.g. "ps2", "ngc").
+    action: "save" (default) or "load".
+    slot: Slot number. Valid range is per-platform — see romm_streaming_config.
+          "load" also accepts the platform's autosave slot.
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+
+    action = action.strip().lower()
+    if action not in ("save", "load"):
+        return 'action must be "save" or "load".'
+    if not platform.strip():
+        return "platform is required (the platform slug of the running session)."
+
+    endpoint = "save-state" if action == "save" else "load-state"
+    try:
+        data = await _post(f"streaming/sessions/{platform.strip()}/{endpoint}",
+                           {"slot": slot}, long_timeout=True)
+    except RuntimeError as e:
+        msg = str(e)
+        if "404" in msg:
+            return f"No active streaming session for platform \"{platform}\"."
+        if "422" in msg:
+            return (f"Slot {slot} is not available for platform \"{platform}\" — "
+                    f"check romm_streaming_config for the valid range.")
+        raise
+
+    status = data.get("status") if isinstance(data, dict) else None
+    verb = "Saving to" if action == "save" else "Loaded from"
+    return f"{verb} slot {slot} on {platform}" + (f" (status: {status})." if status else ".")
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_streaming_audio(platform: str, volume: int | None = None,
+                               mute: bool | None = None) -> str:
+    """Set volume or mute on a running emulator-streaming session (RomM 5.1+).
+
+    platform: Platform slug of the running session (e.g. "ps2", "ngc").
+    volume: Level 0-100. Omit to leave unchanged.
+    mute: true/false to set explicitly. Omit both this and volume to toggle mute.
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+    if not platform.strip():
+        return "platform is required (the platform slug of the running session)."
+    platform = platform.strip()
+
+    results = []
+    try:
+        if volume is not None:
+            if not 0 <= volume <= 100:
+                return "volume must be between 0 and 100."
+            await _post(f"streaming/sessions/{platform}/volume", {"level": volume})
+            results.append(f"volume set to {volume}")
+        if mute is not None or volume is None:
+            body = {} if mute is None else {"mute": mute}
+            data = await _post(f"streaming/sessions/{platform}/mute", body)
+            confirmed = data.get("mute") if isinstance(data, dict) else mute
+            results.append(f"mute is now {confirmed}")
+    except RuntimeError as e:
+        if "404" in str(e):
+            return f"No active streaming session for platform \"{platform}\"."
+        raise
+
+    return f"{platform}: {', '.join(results)}."
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_streaming_stop(platform: str, save_first: bool = True,
+                              slot: int = 0, wait: bool = True) -> str:
+    """Stop a running emulator-streaming session and free the container (RomM 5.1+).
+
+    This kills the running emulator. With save_first the emulator writes a save
+    state before exiting; without it, unsaved progress in that session is lost.
+
+    platform: Platform slug of the running session (e.g. "ps2", "ngc").
+    save_first: Save state before exiting (default true — strongly recommended).
+    slot: Slot to save into when save_first is set (0 = the emulator's default).
+    wait: Block until the save and shutdown finish (default true). False returns
+          immediately while the emulator is still shutting down.
+    """
+    gate = await _version_gate(_V_5_1, "Emulator streaming")
+    if gate:
+        return gate
+    if not platform.strip():
+        return "platform is required (the platform slug of the running session)."
+    platform = platform.strip()
+
+    try:
+        if save_first:
+            data = await _post(f"streaming/sessions/{platform}/save-and-exit",
+                               {"slot": slot, "wait": wait}, long_timeout=True)
+            saved = data.get("saved") if isinstance(data, dict) else None
+            note = ("state saved" if saved
+                    else "the emulator did NOT confirm a save" if saved is False
+                    else "save result unreported")
+            return f"Stopped the {platform} session — {note}."
+        data = await _delete(f"streaming/sessions/{platform}")
+    except RuntimeError as e:
+        if "404" in str(e):
+            return f"No active streaming session for platform \"{platform}\"."
+        raise
+
+    status = data.get("status") if isinstance(data, dict) else None
+    if status == "not_found":
+        return f"No streaming container configured for platform \"{platform}\"."
+    return f"Stopped the {platform} session without saving."
+
+
+# ── Tools — Discovery (RomM 5.1+ / 5.2+) ─────────────────────────────────
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_random_rom(platform_id: int = 0, collection_id: int = 0,
+                          virtual_collection_id: str = "",
+                          smart_collection_id: int = 0) -> str:
+    """Pick one ROM at random — "what should I play?" (RomM 5.2+).
+
+    Narrow the pool with any one of the filters, or none for the whole library.
+
+    platform_id: Restrict to one platform (use romm_platforms for IDs). 0 = all.
+    collection_id: Restrict to a collection (from romm_collections). 0 = none.
+    virtual_collection_id: Restrict to a virtual collection (from romm_virtual_collections).
+    smart_collection_id: Restrict to a smart collection (from romm_smart_collections). 0 = none.
+    """
+    gate = await _version_gate(_V_5_2, "Random ROM pick")
+    if gate:
+        return gate
+
+    params: dict = {}
+    if platform_id:
+        params["platform_ids"] = platform_id
+    if collection_id:
+        params["collection_id"] = collection_id
+    if virtual_collection_id:
+        params["virtual_collection_id"] = virtual_collection_id
+    if smart_collection_id:
+        params["smart_collection_id"] = smart_collection_id
+
+    data = await _get("roms/random", params=params or None)
+    if not isinstance(data, dict) or not data:
+        return "No ROM matched that scope — nothing to pick from."
+    return "Random pick:\n\n" + "\n".join(_fmt_rom_line(data))
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_platform_folders() -> str:
+    """List platform folders on disk that RomM has never scanned (RomM 5.1+).
+
+    These are directories sitting in the library that have no database row yet —
+    the usual reason a game you copied in isn't showing up.
+    """
+    gate = await _version_gate(_V_5_1, "Unscanned platform folders")
+    if gate:
+        return gate
+
+    data = await _get("platforms/filesystem")
+    items = data if isinstance(data, list) else data.get("items", []) if isinstance(data, dict) else []
+    if not items:
+        return "No unscanned platform folders — every folder on disk is known to RomM."
+
+    lines = [f"Platform folders on disk with no database row ({len(items)}):\n"]
+    for p in items:
+        name = p.get("name") or p.get("custom_name") or p.get("fs_slug", "?")
+        lines.append(f"  {name} — folder: {p.get('fs_slug', '?')}, slug: {p.get('slug', '?')}")
+    lines.append("\nRun romm_scan_library (or a scan from the web UI) to import them.")
     return "\n".join(lines)
 
 

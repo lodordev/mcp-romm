@@ -1,6 +1,8 @@
 # RomM MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 40 tools: 26 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, play activity, and tasks — plus 14 write tools for play status, play sessions, favorites, notes, and collection management, through any MCP-compatible AI assistant.
+An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 58 tools: 34 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, soundtracks, play activity, and tasks — plus 24 write tools for play status, play sessions, favorites, notes, collection management, music playlists, and emulator-streaming sessions, through any MCP-compatible AI assistant.
+
+Tracks RomM **5.0 through 5.2**. Features added after 5.0 are version-gated against `/api/heartbeat` and explain themselves on an older server instead of returning a bare 404. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`), so a client can tell a browse from a delete without guessing.
 
 ## Tools
 
@@ -34,10 +36,21 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_smart_collection_detail` | A smart collection's rules and matching ROMs (5.0+) |
 | `romm_whoami` | Authenticated account, role, and effective permissions |
 | `romm_metadata_search` | Search metadata providers (IGDB etc.) for ROM matches (5.0+) |
+| `romm_music_tracks` | Browse the soundtrack library — filterable, paginated game music |
+| `romm_music_facets` | Distinct soundtrack artists / albums / genres / years with counts |
+| `romm_music_favorites` | Your favourite soundtrack tracks (5.1+) |
+| `romm_music_playlists` | List music playlists — yours plus other users' public ones (5.1+) |
+| `romm_music_playlist` | A playlist's details and its tracks, in playlist order (5.1+) |
+| `romm_streaming_config` | Emulator-streaming setup: enabled?, platforms, save-slot capabilities (5.1+) |
+| `romm_streaming_sessions` | Active streaming sessions (admin-only server-side, 5.1+) |
+| `romm_platform_folders` | Platform folders on disk RomM has never scanned (5.1+) |
+| `romm_random_rom` | Pick one ROM at random — "what should I play?" (5.2+) |
 
 ### Write
 
-These modify **your own** user data and collections. They cannot alter ROM files, platforms, firmware, other users, or save files.
+These modify **your own** user data, collections, and music playlists. They cannot alter ROM files, platforms, firmware, other users, or RomM save files.
+
+The exception is the emulator-streaming cluster, which starts and stops a **server-side emulator container** and can write that emulator's own save states. Those are separate from RomM's battery-save files, which no tool here touches.
 
 | Tool | Description |
 |------|-------------|
@@ -55,13 +68,26 @@ These modify **your own** user data and collections. They cannot alter ROM files
 | `romm_create_smart_collection` | Create a smart collection — a saved filter that auto-matches ROMs (5.0+) |
 | `romm_update_smart_collection` | Edit a smart collection's name/description/rules (5.0+) |
 | `romm_delete_smart_collection` | Delete a smart collection — the saved filter only (permanent, 5.0+) |
+| `romm_music_favorite` | Add or remove soundtrack tracks from your favourites (5.1+) |
+| `romm_create_music_playlist` | Create a music playlist (5.1+) |
+| `romm_update_music_playlist` | Edit a playlist's name / description / visibility (5.1+) |
+| `romm_delete_music_playlist` | Delete a playlist — the grouping only, not the audio (permanent, 5.1+) |
+| `romm_music_playlist_tracks` | Add, remove, or reorder tracks in a playlist (5.1+) |
+| `romm_streaming_start` | Launch a ROM in a server-side emulator and get the stream URL (5.1+) |
+| `romm_streaming_state` | Save or load an emulator save state mid-game (5.1+) |
+| `romm_streaming_audio` | Set volume, or set/toggle mute, on a running session (5.1+) |
+| `romm_streaming_stop` | Stop a session — optionally saving state first (5.1+) |
+
+### Not implemented on purpose
+
+RomM 5.1 also added `DELETE /api/roms/{id}/files/{id}` (delete a ROM's files) and `PUT /api/config/scan` (rewrite scan settings). Both are outside this server's boundary — it does not delete library content or rewrite server configuration — so neither has a tool, and neither scope is requested.
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- A running [RomM](https://github.com/rommapp/romm) instance (v5.0+; most read tools also work on v4.4+)
+- A running [RomM](https://github.com/rommapp/romm) instance (v5.0–v5.2; most read tools also work on v4.4+)
 - An **enabled** RomM user account — admin is not required (see [Auth](#auth))
 
 ### Install
@@ -177,23 +203,51 @@ And, with the write tools:
 - "Add it to my backlog and rate it 9"
 - "Make a collection called 'SNES RPGs' and add ROMs 10, 11, and 12"
 - "Add a note to this ROM: 'glitch at the second boss, save often'"
+- "Pick me something random to play on the SNES"
+- "What soundtrack albums do I have by Nobuo Uematsu?"
+- "Make a playlist called 'Focus' and add those tracks"
+- "Launch Shadow of the Colossus in the streaming emulator"
 
 ## Security
 
-- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write`, `collections.write`, and `tasks.run`. It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `assets.write`, `users.write`, or `me.write` — no tool uses them.
-- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes) and your own collections. No tool edits ROM files, platforms, firmware, other users, or uploads/deletes save files.
-- **Destructive ops are labeled.** `romm_delete_note` and `romm_delete_collection` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs.)
+- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write` and `collections.write`, and negotiates for the two optional tiers (`tasks.run`, and `playlists.read`/`playlists.write` on 5.1+). It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `assets.write`, `users.write`, or `me.write` — no tool uses them.
+- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes, music favourites and playlists) and your own collections. No tool edits ROM files, platforms, firmware, other users, or uploads/deletes RomM save files.
+- **Emulator streaming is the one broader surface.** `romm_streaming_*` starts and stops a server-side emulator container and can write that emulator's save states. `romm_streaming_stop` kills a running emulator and is annotated destructive. Nothing here touches RomM's own save files.
+- **Destructive ops are labeled.** Every tool that permanently removes data says so in its description and carries `destructiveHint`. Collection and playlist deletes remove the grouping, never the ROMs or audio.
 - **No disk writes.** Credentials and tokens are held in memory only, never written to disk.
 - **TLS by default.** Certificate verification is enabled by default (`ROMM_TLS_VERIFY=true`).
 - **Auto-retry.** If a token expires mid-session, the server re-authenticates transparently.
 
 ## Auth
 
-The server uses OAuth2 password grant to authenticate with RomM. Tokens are scoped to the minimum permissions needed and automatically refreshed when they expire. If a request gets a 401, the server re-authenticates and retries once.
+The server uses OAuth2 password grant to authenticate with RomM. Tokens are automatically refreshed when they expire, and a 401 triggers one transparent re-authenticate-and-retry.
 
-**Note:** The read and write tools operate on your own library and user data, so an ordinary **enabled** RomM user account is sufficient — admin is not required. (`romm_scan_library` does require an account permitted to run tasks.)
+**Scopes are negotiated, not assumed.** RomM's token endpoint rejects the *entire* request with `403 Insufficient scope` if any single requested scope falls outside the account's set — so asking for a scope your server or account doesn't have would take down every tool, not just the ones that need it. On first authentication this server asks for everything it wants; if that is refused it establishes that the core set works, then probes each optional tier once and drops the ones refused. The result is cached for the process, so token expiry doesn't re-run the probe. `romm_status` reports what was granted and what was dropped, and any tool needing a dropped tier says so plainly.
+
+This matters in two common cases:
+
+- **RomM 5.0 servers**, where `playlists.*` does not exist at all.
+- **Least-privilege service accounts**, which typically lack the admin-tier `tasks.run`.
+
+**Note:** The read and write tools operate on your own library and user data, so an ordinary **enabled** RomM user account is sufficient — admin is not required. (`romm_scan_library` needs an account permitted to run tasks; `romm_streaming_sessions` is admin-only on RomM's side and says so.)
 
 **RomM 5.0 role change:** RomM 5.0 collapsed the old `viewer`/`editor`/`admin` roles into `user`/`admin` and moved fine-grained authorization to a permissions system (legacy roles are coerced to `user` on upgrade). If a tool unexpectedly gets a 403 on a 5.0 instance, check the account's effective permissions (`GET /api/permissions/me`) in the RomM admin UI.
+
+## Version support
+
+| RomM | Status |
+|------|--------|
+| 4.4–4.9 | Most read tools work; anything marked 5.0+ does not |
+| 5.0 | Fully exercised, live e2e (see Known issues for 5.0.0 server bugs) |
+| 5.1 | Music favourites/playlists, emulator streaming, unscanned platform folders |
+| 5.2 | Random ROM pick |
+
+The 5.1 and 5.2 tools were built against RomM's tagged source (routes, request
+bodies, response shapes, and scope requirements read from the 5.1.0 and 5.2.0
+tags) and are covered by unit tests, but have **not yet been exercised against
+a live 5.1/5.2 instance**. The API surface is purely additive from 5.0.0 to
+5.2.0 — 26 routes added, none removed or changed — so nothing that worked on
+5.0 is at risk.
 
 ## Known issues
 
