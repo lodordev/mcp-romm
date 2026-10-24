@@ -62,6 +62,11 @@ version-gated and explain themselves on an older server.
 
 ### Changed
 
+- Verified live against RomM 5.4.1 as a least-privilege account (`smoke_test.py`:
+  80 PASS). Shared memory cards need an `emulator` (RomM lists them per
+  emulator); Apprise channels are admin-only server-side and the tools say
+  so; a ROM whose platform has no streaming container gets a clear message
+  from `romm_streaming_state_picks`.
 - `fastmcp` is now pinned `>=2.0.0,<4` — the server runs on both 2.x and
   3.x, and the upper bound keeps a rebuild from picking up a future major
   unreviewed.

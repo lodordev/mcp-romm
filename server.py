@@ -3143,7 +3143,9 @@ async def romm_memory_cards(emulator: str = "", include_shared: bool = False) ->
     """List your memory cards, optionally plus cards other users made public (RomM 5.3+).
 
     emulator: Filter by emulator name as RomM records it (e.g. "duckstation").
-    include_shared: Also list public cards from other users.
+              Required when include_shared is set — RomM lists shared cards
+              per emulator only.
+    include_shared: Also list public cards from other users (needs emulator).
     """
     gate = await _version_gate(_V_5_3, "Memory cards")
     if gate:
@@ -3151,6 +3153,9 @@ async def romm_memory_cards(emulator: str = "", include_shared: bool = False) ->
     params: dict = {}
     if emulator.strip():
         params["emulator"] = emulator.strip()
+    if include_shared and not params:
+        return ("include_shared needs an emulator — RomM lists shared memory cards "
+                "per emulator (e.g. emulator=\"duckstation\").")
     mine = await _get("memory-cards", params=params)
     lines: list[str] = []
     mine = mine if isinstance(mine, list) else []
@@ -3443,7 +3448,13 @@ async def romm_streaming_state_picks(rom_id: int) -> str:
     gate = await _version_gate(_V_5_4, "Streaming state picks")
     if gate:
         return gate
-    data = await _get(f"streaming/states/{rom_id}")
+    try:
+        data = await _get(f"streaming/states/{rom_id}")
+    except RuntimeError as e:
+        if "404" in str(e):
+            return (f"ROM {rom_id} can't be streamed here — no streaming container is "
+                    f"configured for its platform (see romm_streaming_config).")
+        raise
     if not isinstance(data, dict):
         return "Unexpected response from the state picks endpoint."
     native = data.get("native") or []
@@ -3759,8 +3770,8 @@ async def romm_create_notification_channel(channel_type: str, name: str, url: st
     channel_type: "webhook" (needs url; optional secret for HMAC signing),
                   "email" (needs address; RomM emails a confirmation code —
                   finish with romm_confirm_notification_channel), or
-                  "apprise" (needs service + fields_json, see
-                  romm_apprise_services).
+                  "apprise" (admin accounts only; needs service + fields_json,
+                  see romm_apprise_services).
     name: A label for the channel.
     url / address / secret / service / fields_json: Per channel_type above.
           fields_json is a JSON object of the Apprise service's fields.
@@ -3812,7 +3823,12 @@ async def romm_create_notification_channel(channel_type: str, name: str, url: st
         payload["service"] = service.strip()
         payload["fields"] = fields
 
-    data = await _post("notification-channels", payload)
+    try:
+        data = await _post("notification-channels", payload)
+    except RuntimeError as e:
+        if channel_type == "apprise" and "403" in str(e):
+            return "Apprise channels are admin-only in RomM, and this account is not an admin."
+        raise
     if isinstance(data, dict) and data.get("id"):
         tail = ""
         if channel_type == "email":
@@ -3825,12 +3841,21 @@ async def romm_create_notification_channel(channel_type: str, name: str, url: st
 async def romm_apprise_services(search: str = "") -> str:
     """List the Apprise services RomM can deliver notifications to, with their fields (RomM 5.4+).
 
+    Apprise channels are an admin feature in RomM: an ordinary account can use
+    webhook and email channels, and gets a clear "admin-only" here.
+
     search: Substring filter on the service name (e.g. "discord", "telegram").
     """
     gate = await _version_gate(_V_5_4, "Notification channels")
     if gate:
         return gate
-    data = await _get("notification-channels/apprise-services")
+    try:
+        data = await _get("notification-channels/apprise-services")
+    except RuntimeError as e:
+        if "403" in str(e):
+            return ("Apprise channels are admin-only in RomM, and this account is not an "
+                    "admin — use a webhook or email channel instead.")
+        raise
     if not isinstance(data, list) or not data:
         return "No Apprise services reported by the server."
     needle = search.strip().lower()

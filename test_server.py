@@ -1314,3 +1314,27 @@ async def test_platform_slug_is_quoted_in_streaming_paths(v54, calls):
     calls.responses.append({"host": "h"})
     await server.romm_streaming_join("ps2/../admin")
     assert calls[0]["path"] == "streaming/sessions/ps2%2F..%2Fadmin/join"
+
+
+# ── Live-run fixes (5.4.1 e2e, 2026-10-24) ──────────────────────────────────
+
+
+async def test_memory_cards_shared_requires_emulator(v54, calls):
+    out = await server.romm_memory_cards(include_shared=True)
+    assert "needs an emulator" in out and not calls
+
+
+async def test_state_picks_no_container_is_explained(v54, monkeypatch):
+    async def nf(*a, **k):
+        raise RuntimeError("API error 404: No streaming container configured for platform 'gba'")
+    monkeypatch.setattr(server, "_request", nf)
+    out = await server.romm_streaming_state_picks(5)
+    assert "no streaming container" in out
+
+
+async def test_apprise_services_admin_only(v54, monkeypatch):
+    async def forbidden(*a, **k):
+        raise RuntimeError("API error 403: Administrator privileges required")
+    monkeypatch.setattr(server, "_request", forbidden)
+    out = await server.romm_apprise_services()
+    assert "admin-only" in out
