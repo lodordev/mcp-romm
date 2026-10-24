@@ -1649,7 +1649,13 @@ async def romm_scan_library(scan_type: str = "quick", platform_ids: list[int] | 
         body: dict = {"type": scan_type}
         if platform_ids:
             body["platforms"] = [int(p) for p in platform_ids]
-        data = await _post("tasks/scan", body, long_timeout=True)
+        try:
+            data = await _post("tasks/scan", body, long_timeout=True)
+        except RuntimeError as e:
+            if "409" in str(e):
+                return ("A scan is already running on the server — wait for it to finish "
+                        "(romm_tasks shows running tasks) and try again.")
+            raise
         if isinstance(data, dict) and data:
             job_id = data.get("task_id") or data.get("id", "")
             status = data.get("status", "started")

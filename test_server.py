@@ -1338,3 +1338,11 @@ async def test_apprise_services_admin_only(v54, monkeypatch):
     monkeypatch.setattr(server, "_request", forbidden)
     out = await server.romm_apprise_services()
     assert "admin-only" in out
+
+
+async def test_scan_library_409_is_explained(v54, monkeypatch):
+    async def busy(*a, **k):
+        raise RuntimeError('API error 409: {"detail":"Quick Scan is already running"}')
+    monkeypatch.setattr(server, "_request", busy)
+    out = await server.romm_scan_library()
+    assert "already running" in out
