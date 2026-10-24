@@ -141,6 +141,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from urllib.parse import quote
+
 import httpx
 from fastmcp import FastMCP
 
@@ -647,6 +649,16 @@ def _untrusted(text: object, limit: int = 300) -> str:
     if len(s) > limit:
         s = s[:limit].rstrip() + "…"
     return s
+
+
+def _seg(value: object) -> str:
+    """Percent-encode a caller-supplied value used as ONE URL path segment.
+
+    Device IDs, request IDs and platform slugs come from tool arguments. Quoting
+    with safe="" means a value like "../users" or "a/b" stays a single literal
+    segment instead of rewriting the route.
+    """
+    return quote(str(value).strip(), safe="")
 
 
 def _mask(value: object) -> str:
@@ -2909,11 +2921,11 @@ async def romm_streaming_audio(platform: str, volume: int | None = None,
         if volume is not None:
             if not 0 <= volume <= 100:
                 return "volume must be between 0 and 100."
-            await _post(f"streaming/sessions/{platform}/volume", {"level": volume})
+            await _post(f"streaming/sessions/{_seg(platform)}/volume", {"level": volume})
             results.append(f"volume set to {volume}")
         if mute is not None or volume is None:
             body = {} if mute is None else {"mute": mute}
-            data = await _post(f"streaming/sessions/{platform}/mute", body)
+            data = await _post(f"streaming/sessions/{_seg(platform)}/mute", body)
             confirmed = data.get("mute") if isinstance(data, dict) else mute
             results.append(f"mute is now {confirmed}")
     except RuntimeError as e:
@@ -2947,14 +2959,14 @@ async def romm_streaming_stop(platform: str, save_first: bool = True,
 
     try:
         if save_first:
-            data = await _post(f"streaming/sessions/{platform}/save-and-exit",
+            data = await _post(f"streaming/sessions/{_seg(platform)}/save-and-exit",
                                {"slot": slot, "wait": wait}, long_timeout=True)
             saved = data.get("saved") if isinstance(data, dict) else None
             note = ("state saved" if saved
                     else "the emulator did NOT confirm a save" if saved is False
                     else "save result unreported")
             return f"Stopped the {platform} session — {note}."
-        data = await _delete(f"streaming/sessions/{platform}")
+        data = await _delete(f"streaming/sessions/{_seg(platform)}")
     except RuntimeError as e:
         if "404" in str(e):
             return f"No active streaming session for platform \"{platform}\"."
@@ -3350,7 +3362,7 @@ async def romm_streaming_join(platform: str, container: str = "") -> str:
     if container.strip():
         params["container"] = container.strip()
     try:
-        data = await _post(f"streaming/sessions/{platform}/join", params=params)
+        data = await _post(f"streaming/sessions/{_seg(platform)}/join", params=params)
     except RuntimeError as e:
         if "404" in str(e):
             return f"No joinable session for platform \"{platform}\"."
@@ -3378,7 +3390,7 @@ async def romm_streaming_status(platform: str, claimed_at: str = "") -> str:
     params: dict = {}
     if claimed_at.strip():
         params["claimed_at"] = claimed_at.strip()
-    data = await _get(f"streaming/sessions/{platform}/status", params=params)
+    data = await _get(f"streaming/sessions/{_seg(platform)}/status", params=params)
     if not isinstance(data, dict):
         return "Unexpected response from the status endpoint."
     lines = [f"{platform} session: {data.get('status', '?')}"]
@@ -3414,7 +3426,7 @@ async def romm_streaming_swap_disc(platform: str, file_id: int, container: str =
     params: dict = {}
     if container.strip():
         params["container"] = container.strip()
-    data = await _post(f"streaming/sessions/{platform}/swap-disc", {"file_id": int(file_id)}, params=params)
+    data = await _post(f"streaming/sessions/{_seg(platform)}/swap-disc", {"file_id": int(file_id)}, params=params)
     status = data.get("status", "ok") if isinstance(data, dict) else "ok"
     return f"Disc swap on {platform}: {status} (file {file_id})."
 
@@ -3973,7 +3985,7 @@ async def romm_device_installs(device_id: str) -> str:
     device_id = device_id.strip()
     if not device_id:
         return "device_id is required."
-    data = await _get(f"devices/{device_id}/installs")
+    data = await _get(f"devices/{_seg(device_id)}/installs")
     if not isinstance(data, list) or not data:
         return f"No install requests for device {device_id}."
     lines = [f"Install requests for device {device_id} ({len(data)}):\n"]
@@ -4019,7 +4031,7 @@ async def romm_install_on_device(device_id: str, rom_id: int) -> str:
     if not device_id or not rom_id:
         return "device_id and rom_id are required."
     try:
-        data = await _post(f"devices/{device_id}/installs", {"rom_id": int(rom_id)})
+        data = await _post(f"devices/{_seg(device_id)}/installs", {"rom_id": int(rom_id)})
     except RuntimeError as e:
         msg = str(e)
         if "404" in msg:
@@ -4050,7 +4062,7 @@ async def romm_cancel_install(device_id: str, request_id: str) -> str:
     device_id, request_id = device_id.strip(), request_id.strip()
     if not device_id or not request_id:
         return "device_id and request_id are required."
-    await _delete(f"devices/{device_id}/installs/{request_id}")
+    await _delete(f"devices/{_seg(device_id)}/installs/{_seg(request_id)}")
     return f"Install request {request_id} on device {device_id} cancelled."
 
 

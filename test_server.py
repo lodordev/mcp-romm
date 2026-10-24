@@ -1292,3 +1292,25 @@ async def test_every_tool_is_annotated_and_destructive_ones_say_so():
     for name in ("romm_recommendations", "romm_notifications", "romm_audit_events",
                  "romm_memory_cards", "romm_states", "romm_device_installs"):
         assert tools[name].readOnlyHint is True, name
+
+
+# ── Path-segment quoting ────────────────────────────────────────────────────
+
+
+def test_seg_quotes_everything_unsafe():
+    assert server._seg("../users") == "..%2Fusers"
+    assert server._seg(" a b/c?d ") == "a%20b%2Fc%3Fd"
+    assert server._seg("ps2") == "ps2"
+
+
+async def test_device_and_request_ids_are_quoted_in_paths(v54, tiers_on, calls):
+    await server.romm_cancel_install("dev/../x", "r?1")
+    assert calls[0]["path"] == "devices/dev%2F..%2Fx/installs/r%3F1"
+    await server.romm_device_installs("a b")
+    assert calls[1]["path"] == "devices/a%20b/installs"
+
+
+async def test_platform_slug_is_quoted_in_streaming_paths(v54, calls):
+    calls.responses.append({"host": "h"})
+    await server.romm_streaming_join("ps2/../admin")
+    assert calls[0]["path"] == "streaming/sessions/ps2%2F..%2Fadmin/join"
