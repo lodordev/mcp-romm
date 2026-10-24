@@ -163,6 +163,7 @@ Set environment variables:
 | `ROMM_MCP_TRANSPORT` | No | `stdio` | `stdio` (client spawns the process) or `http` (serve remote MCP clients) |
 | `ROMM_MCP_HOST` | No | `127.0.0.1` | Bind address for `http` transport |
 | `ROMM_MCP_PORT` | No | `8765` | Port for `http` transport |
+| `ROMM_MCP_ALLOWED_HOSTS` | No | | Comma list of the Host values clients will use (e.g. your Tailscale IP or name). Turns on FastMCP's Host/Origin check, which is what stops a DNS-rebinding page in a browser from driving this server. **Set it for any non-loopback bind.** |
 
 ### Add to Claude Code
 
@@ -225,6 +226,12 @@ network only (LAN, VPN, or an overlay network like Tailscale), never the open
 internet. Note that claude.ai web/mobile connectors connect from Anthropic's
 cloud and cannot reach private-network URLs.
 
+"Trusted network" is weaker than it sounds: a web page open in a browser on
+any machine that can reach the port can target it through DNS rebinding,
+because FastMCP validates `Host`/`Origin` only for loopback binds by default.
+Set `ROMM_MCP_ALLOWED_HOSTS` to the exact host values your clients use
+(`ROMM_MCP_ALLOWED_HOSTS=100.64.0.9`) and FastMCP rejects everything else.
+
 ## Examples
 
 Once configured, you can ask your AI assistant things like:
@@ -260,9 +267,11 @@ And, with the write tools:
 
 - **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write` and `collections.write`, and negotiates for the two optional tiers (`tasks.run`, and `playlists.read`/`playlists.write` on 5.1+). It never requests `roms.write`, `platforms.write`, `firmware.write`, or `users.write`.
 - **Opt-in write tiers.** `me.write`, `devices.write` and `assets.write` are requested only when you list their tier in `ROMM_WRITE_TIERS`. `me.write` also lets a token edit the account's own profile in RomM, which is exactly why notifications are off until you turn them on.
-- **Read-only kill switch.** `ROMM_READ_ONLY=true` is enforced inside the HTTP helper: no non-GET request leaves the process, regardless of which tool was called.
+- **Read-only kill switch.** `ROMM_READ_ONLY=true` does two things: the HTTP helper refuses every non-GET API call regardless of which tool was called, and the token is requested with no `*.write` scope and no `tasks.run`, so the credential a read-only process holds cannot write even if it leaked. (The OAuth grant itself is still a POST to `/api/token`.)
 - **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes, music favourites and playlists, notifications, save/state metadata) and your own collections and devices. No tool edits ROM files, platforms, firmware, other users, or uploads/downloads/deletes RomM save files or memory-card images.
-- **Untrusted text stays in its field.** Notes, notification bodies, labels, channel names, audit targets and other users' names are rendered with control characters stripped, newlines collapsed and length capped, so content written by someone else can't masquerade as tool output. Channel targets and secrets are shown masked and never echoed back.
+- **Untrusted text stays in its field.** ROM names and summaries (from metadata providers), notes, collection and playlist descriptions, notification bodies, labels, channel names, audit targets and other users' names are rendered with control characters, bidi overrides, zero-width and Unicode tag characters stripped, newlines collapsed and length capped, so content written by someone else can't masquerade as tool output. This keeps text visibly inside its field; it does not try to judge what the text says. Channel targets and secrets are shown masked and never echoed back.
+- **Webhooks can't point inward.** With the `notifications` tier on, RomM becomes an outbound HTTP client for whatever webhook URL a tool call supplies, so loopback, private, link-local and bare internal hostnames are refused, and notification links must be a RomM path or an http(s) URL.
+- **No ownership checks of its own.** Deletes and dismissals by ID rely on RomM's authorization — this server never sees whose object an ID is. Keep the account's grants scoped (RomM's permission groups) if "your own data only" matters to you.
 - **Emulator streaming is the one broader surface.** `romm_streaming_*` starts and stops a server-side emulator container and can write that emulator's save states. `romm_streaming_stop` kills a running emulator and is annotated destructive. Nothing here touches RomM's own save files.
 - **Destructive ops are labeled.** Every tool that permanently removes data says so in its description and carries `destructiveHint`. Collection and playlist deletes remove the grouping, never the ROMs or audio.
 - **No disk writes.** Credentials and tokens are held in memory only, never written to disk. The password can come from a file (`ROMM_PASSWORD_FILE`) rather than the environment.
@@ -297,10 +306,15 @@ This matters in two common cases:
 
 The 5.3 and 5.4 tools were built against RomM's tagged source and the live
 5.4.1 OpenAPI schema (routes, request bodies, response shapes, and scope
-requirements), and are covered by unit tests. The API surface is purely
+requirements). Every new tool has request-shaping unit tests, and the suite
+was run live against RomM 5.4.1 as a least-privilege account (82 of 83 live
+checks passing; the one miss was a scan refused because another scan was
+already running, which the tool now explains). The API surface is purely
 additive from 5.0.0 through 5.4.1 — routes were added, none removed or
-changed — so nothing that worked on an older server is at risk. The
-`smoke_test.py` suite exercises the read side of every cluster live.
+changed — so nothing that worked on an older server is at risk.
+`smoke_test.py` exercises the read side of each new cluster live where the
+server has data for it; per-card and per-session detail tools need an
+existing card or session and are unit-tested instead.
 
 ## Known issues
 

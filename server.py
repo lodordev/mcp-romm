@@ -94,6 +94,10 @@ Environment variables:
                           remote clients over Streamable HTTP
   ROMM_MCP_HOST         — Bind address for http transport (default: 127.0.0.1)
   ROMM_MCP_PORT         — Port for http transport (default: 8765)
+  ROMM_MCP_ALLOWED_HOSTS — Comma list of Host values clients use (e.g. the
+                          Tailscale IP or name); turns on FastMCP's
+                          Host/Origin check against DNS rebinding. Unset =
+                          FastMCP "auto" (loopback binds only are guarded).
 
 Security:
   - Least privilege: the token requests read scopes plus roms.user.write,
@@ -106,8 +110,10 @@ Security:
     widens the token beyond "your own play data and collections" — me.write
     in particular also covers profile edits in RomM — so they are off until
     the operator turns them on.
-  - ROMM_READ_ONLY=true is a kill switch enforced in _request(): no non-GET
-    call leaves the process, whatever a tool was asked to do.
+  - ROMM_READ_ONLY=true is a kill switch: _request() refuses every non-GET
+    API call, and the token is requested WITHOUT any *.write scope or
+    tasks.run, so even the credential a read-only process holds cannot
+    write. (The OAuth token grant itself is still a POST to /api/token.)
   - Untrusted text (notes, notification bodies, labels, channel names, audit
     targets, other users' names) is rendered through _untrusted(): control
     characters stripped, newlines collapsed, length capped. Secret-bearing
@@ -141,7 +147,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from urllib.parse import quote
+import ipaddress
+from urllib.parse import quote, urlsplit
 
 import httpx
 from fastmcp import FastMCP
@@ -253,6 +260,12 @@ _CORE_SCOPES: tuple[str, ...] = (
     "collections.read", "collections.write",
 )
 
+# ROMM_READ_ONLY narrows the credential too, not just the HTTP method: no
+# *.write scope and no tasks.run is ever requested, so even a leaked token
+# from a read-only process cannot write.
+if cfg.read_only:
+    _CORE_SCOPES = tuple(s for s in _CORE_SCOPES if not s.endswith(".write"))
+
 # Scopes a server or account may legitimately not have. RomM's token endpoint
 # rejects the WHOLE request with 403 "Insufficient scope" when any requested
 # scope is outside the user's set (backend/endpoints/auth.py) — so asking for
@@ -282,6 +295,12 @@ _WRITE_TIER_SCOPES: dict[str, tuple[str, ...]] = {
 }
 for _tier in cfg.write_tiers:
     _OPTIONAL_SCOPE_TIERS[_tier] = _WRITE_TIER_SCOPES[_tier]
+if cfg.read_only:
+    _OPTIONAL_SCOPE_TIERS = {
+        tier: tuple(s for s in scopes if not s.endswith(".write") and s != "tasks.run")
+        for tier, scopes in _OPTIONAL_SCOPE_TIERS.items()
+    }
+    _OPTIONAL_SCOPE_TIERS = {t: sc for t, sc in _OPTIONAL_SCOPE_TIERS.items() if sc}
 
 # The full set we'd like, in canonical order. Kept as a single string because
 # that is what the OAuth form field takes.
@@ -631,7 +650,12 @@ def _write_gate(feature: str, tier: str | None = None) -> str | None:
     return None
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0/C1 controls, DEL, bidi overrides/isolates, zero-width + BOM, and the
+# Unicode TAG block (invisible-instruction vector) — none belong in a label.
+_CONTROL_CHARS = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e"
+    r"\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]"
+)
 
 
 def _untrusted(text: object, limit: int = 300) -> str:
@@ -659,6 +683,42 @@ def _seg(value: object) -> str:
     segment instead of rewriting the route.
     """
     return quote(str(value).strip(), safe="")
+
+
+def _webhook_url_problem(url: str) -> str | None:
+    """Why a webhook URL is refused, or None when it is acceptable.
+
+    RomM becomes an outbound HTTP client for this URL and will carry
+    model-chosen notification bodies to it, so loopback, private, link-local
+    and bare-hostname targets are refused here rather than trusting the
+    operator to have thought about it.
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return "url could not be parsed."
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "url must be an absolute http:// or https:// URL."
+    host = parts.hostname.lower()
+    if host in ("localhost",) or "." not in host or host.endswith((".local", ".internal", ".localhost")):
+        return "url must point at a public host, not localhost or an internal name."
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not ip.is_global:
+        return "url must not point at a private, loopback or link-local address."
+    return None
+
+
+def _link_problem(link: str) -> str | None:
+    """Notification links may be a RomM-relative path or an http(s) URL only."""
+    l = link.strip()
+    if l.startswith("/") and not l.startswith("//"):
+        return None
+    if l.lower().startswith(("http://", "https://")):
+        return None
+    return "link must be a path starting with / or an http(s):// URL."
 
 
 def _mask(value: object) -> str:
@@ -691,11 +751,11 @@ def _fmt_size(size_bytes: int | float | None) -> str:
 
 def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
     """Format a ROM into display lines. Reused across multiple tools."""
-    name = rom.get("name", "Unknown")
-    platform = rom.get("platform_display_name") or rom.get("platform_slug", "?")
+    name = _untrusted(rom.get("name") or "Unknown", 160)
+    platform = _untrusted(rom.get("platform_display_name") or rom.get("platform_slug", "?"), 60)
     size = rom.get("fs_size_bytes", 0)
     rom_id = rom.get("id", "?")
-    summary = rom.get("summary", "")
+    summary = _untrusted(rom.get("summary", ""), 400)
     user = rom.get("rom_user", {}) or {}
     is_fav = user.get("is_favorite", False) if isinstance(user, dict) else False
 
@@ -1021,7 +1081,7 @@ async def romm_get_item(rom_id: int) -> str:
     if last_played:
         lines.append(f"  Last played: {last_played}")
     if note_raw:
-        lines.append(f"  Note: {note_raw[:200]}")
+        lines.append(f"  Note: {_untrusted(note_raw, 200)}")
     elif has_notes:
         lines.append("  Notes: yes (view with romm_rom_notes)")
 
@@ -1191,12 +1251,9 @@ async def romm_collections() -> str:
             roms = c.get("roms", [])
             rom_count = len(roms) if isinstance(roms, list) else 0
 
-        lines.append(f"  {name} ({rom_count} ROM{'s' if rom_count != 1 else ''})")
+        lines.append(f"  {_untrusted(name, 120)} ({rom_count} ROM{'s' if rom_count != 1 else ''})")
         if desc:
-            short = desc[:100]
-            if len(desc) > 100:
-                short += "..."
-            lines.append(f"    {short}")
+            lines.append(f"    {_untrusted(desc, 100)}")
         lines.append(f"    ID: {cid}")
         lines.append("")
 
@@ -1279,12 +1336,9 @@ async def romm_smart_collections() -> str:
             header += f" ({count} ROM{'s' if count != 1 else ''})"
         lines.append(header)
         if c.get("filter_summary"):
-            lines.append(f"    Rules: {c['filter_summary'][:120]}")
+            lines.append(f"    Rules: {_untrusted(c['filter_summary'], 120)}")
         if desc:
-            short = desc[:100]
-            if len(desc) > 100:
-                short += "..."
-            lines.append(f"    {short}")
+            lines.append(f"    {_untrusted(desc, 100)}")
         lines.append(f"    ID: {cid}")
         lines.append("")
 
@@ -1434,17 +1488,14 @@ async def romm_rom_notes(rom_id: int) -> str:
 
         header = f"  [{note_id}]"
         if title:
-            header += f" {title}"
+            header += f" {_untrusted(title, 120)}"
         if username:
-            header += f" — by {username}"
+            header += f" — by {_untrusted(username, 40)}"
         if is_public:
             header += " (public)"
         lines.append(header)
         if content:
-            short = content[:300]
-            if len(content) > 300:
-                short += "..."
-            lines.append(f"      {short}")
+            lines.append(f"      {_untrusted(content, 300)}")
         if created:
             line = f"    Created: {created}"
             if updated and updated != created:
@@ -1972,9 +2023,9 @@ async def romm_activity(rom_id: int = 0, limit: int = 20) -> str:
 
     lines = [f"Play activity (showing {min(len(data), limit)} of {len(data)}):\n"]
     for a in data[:limit]:
-        user = a.get("username", "?")
-        rom = a.get("rom_name") or f"ROM {a.get('rom_id', '?')}"
-        platform = a.get("platform_name") or a.get("platform_slug", "")
+        user = _untrusted(a.get("username", "?"), 40)
+        rom = _untrusted(a.get("rom_name") or f"ROM {a.get('rom_id', '?')}", 120)
+        platform = _untrusted(a.get("platform_name") or a.get("platform_slug", ""), 60)
         started = a.get("started_at", "")
 
         line = f"  - {user} played {rom}"
@@ -2092,7 +2143,7 @@ async def romm_virtual_collection_detail(virtual_id: str) -> str:
 
     virtual_id: The virtual collection's ID string (from romm_virtual_collections).
     """
-    data = await _get(f"collections/virtual/{virtual_id}")
+    data = await _get(f"collections/virtual/{_seg(virtual_id)}")
 
     if not isinstance(data, dict) or "id" not in data:
         return f"Virtual collection {virtual_id} not found."
@@ -2586,15 +2637,15 @@ async def romm_music_playlists() -> str:
 
     lines = [f"Music playlists ({len(items)}):\n"]
     for p in items:
-        line = f"  {p.get('name', '?')} — {p.get('track_count', 0)} track(s)"
+        line = f"  {_untrusted(p.get('name', '?'), 120)} — {p.get('track_count', 0)} track(s)"
         if p.get("is_public"):
             line += " [public]"
         owner = p.get("owner_username")
         if owner:
-            line += f" · by {owner}"
+            line += f" · by {_untrusted(owner, 40)}"
         lines.append(line)
         if p.get("description"):
-            lines.append(f"     {str(p['description'])[:120]}")
+            lines.append(f"     {_untrusted(p['description'], 120)}")
         lines.append(f"     ID: {p.get('id', '?')}")
     return "\n".join(lines)
 
@@ -2621,12 +2672,12 @@ async def romm_music_playlist(playlist_id: int, order_by: str = "position",
     meta = await _get(f"music/playlists/{playlist_id}")
     lines = []
     if isinstance(meta, dict) and meta:
-        lines.append(f"Playlist: {meta.get('name', '?')} (id {meta.get('id', playlist_id)})")
+        lines.append(f"Playlist: {_untrusted(meta.get('name', '?'), 120)} (id {meta.get('id', playlist_id)})")
         if meta.get("description"):
-            lines.append(f"  {meta['description']}")
+            lines.append(f"  {_untrusted(meta['description'], 300)}")
         lines.append(f"  Tracks: {meta.get('track_count', 0)} · "
                      f"{'public' if meta.get('is_public') else 'private'} · "
-                     f"owner: {meta.get('owner_username', '?')}\n")
+                     f"owner: {_untrusted(meta.get('owner_username', '?'), 40)}\n")
 
     tracks = await _get(
         f"music/playlists/{playlist_id}/tracks",
@@ -2826,7 +2877,7 @@ async def romm_streaming_sessions() -> str:
 
     lines = [f"Active streaming sessions ({len(data)}):\n"]
     for key, s in data.items():
-        lines.append(f"  {s.get('rom_name', '?')}")
+        lines.append(f"  {_untrusted(s.get('rom_name', '?'), 120)}")
         lines.append(f"     Claimed: {s.get('claimed_at', '?')} by user {s.get('user_id', '?')}")
         lines.append(f"     Container: {key}")
     return "\n".join(lines)
@@ -2859,7 +2910,7 @@ async def romm_streaming_start(rom_id: int) -> str:
 
     if not isinstance(data, dict):
         return "Streaming session started."
-    return (f"Streaming \"{data.get('rom_name', '?')}\" "
+    return (f"Streaming \"{_untrusted(data.get('rom_name', '?'), 120)}\" "
             f"({data.get('label') or data.get('platform', '?')}).\n"
             f"  Open: {data.get('host', '?')}\n"
             f"  Claimed at: {data.get('claimed_at', '?')}")
@@ -2890,7 +2941,7 @@ async def romm_streaming_state(platform: str, action: str = "save",
 
     endpoint = "save-state" if action == "save" else "load-state"
     try:
-        data = await _post(f"streaming/sessions/{platform.strip()}/{endpoint}",
+        data = await _post(f"streaming/sessions/{_seg(platform)}/{endpoint}",
                            {"slot": slot}, long_timeout=True)
     except RuntimeError as e:
         msg = str(e)
@@ -3708,6 +3759,9 @@ async def romm_send_notification(title: str, body: str = "", level: str = "info"
     if body.strip():
         payload["body"] = body.strip()[:2000]
     if link.strip():
+        problem = _link_problem(link)
+        if problem:
+            return problem
         payload["link"] = link.strip()[:500]
     data = await _post("notifications", payload)
     nid = data.get("id") if isinstance(data, dict) else None
@@ -3808,8 +3862,9 @@ async def romm_create_notification_channel(channel_type: str, name: str, url: st
     if parsed_topics:
         payload["topics"] = parsed_topics
     if channel_type == "webhook":
-        if not url.strip().lower().startswith(("http://", "https://")):
-            return "url is required for a webhook channel and must start with http:// or https://."
+        problem = _webhook_url_problem(url) if url.strip() else "url is required for a webhook channel."
+        if problem:
+            return problem
         payload["url"] = url.strip()
         if secret.strip():
             payload["secret"] = secret.strip()
@@ -3912,8 +3967,9 @@ async def romm_update_notification_channel(channel_id: int, name: str = "", enab
             return parsed
         payload["topics"] = parsed or None
     if url.strip():
-        if not url.strip().lower().startswith(("http://", "https://")):
-            return "url must start with http:// or https://."
+        problem = _webhook_url_problem(url)
+        if problem:
+            return problem
         payload["url"] = url.strip()
     if address.strip():
         payload["address"] = address.strip()
@@ -4163,10 +4219,23 @@ def _transport_config() -> tuple[str, dict]:
     transport = os.getenv("ROMM_MCP_TRANSPORT", "stdio").strip().lower()
     if transport in ("", "stdio"):
         return "stdio", {}
-    return transport, {
+    kwargs: dict = {
         "host": os.getenv("ROMM_MCP_HOST", "127.0.0.1"),
         "port": int(os.getenv("ROMM_MCP_PORT", "8765")),
     }
+    # DNS-rebinding defence: a browser on any machine that can reach this
+    # port could otherwise drive the MCP through a rebound hostname. With
+    # ROMM_MCP_ALLOWED_HOSTS set, FastMCP rejects requests whose Host/Origin
+    # is not in the list; unset, FastMCP's "auto" mode protects loopback
+    # binds only, and the README says so.
+    allowed = [h.strip() for h in os.getenv("ROMM_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if allowed:
+        kwargs["host_origin_protection"] = True
+        kwargs["allowed_hosts"] = allowed
+        kwargs["allowed_origins"] = [f"http://{h}" for h in allowed] + [f"https://{h}" for h in allowed]
+    else:
+        kwargs["host_origin_protection"] = "auto"
+    return transport, kwargs
 
 
 if __name__ == "__main__":

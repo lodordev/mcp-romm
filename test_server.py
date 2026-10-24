@@ -215,7 +215,7 @@ def test_transport_http_reads_host_port(monkeypatch):
     monkeypatch.setenv("ROMM_MCP_HOST", "0.0.0.0")
     monkeypatch.setenv("ROMM_MCP_PORT", "9000")
     assert server._transport_config() == (
-        "http", {"host": "0.0.0.0", "port": 9000})
+        "http", {"host": "0.0.0.0", "port": 9000, "host_origin_protection": "auto"})
 
 
 # ── play sessions, smart/virtual collections, identity (v1.2) ────────────────
@@ -1346,3 +1346,153 @@ async def test_scan_library_409_is_explained(v54, monkeypatch):
     monkeypatch.setattr(server, "_request", busy)
     out = await server.romm_scan_library()
     assert "already running" in out
+
+
+# ══ Security review follow-ups (2026-10-24) ═════════════════════════════════
+
+
+async def test_streaming_state_platform_is_quoted(v54, calls):
+    calls.responses.append({"status": "ok"})
+    await server.romm_streaming_state("ps2/../x", action="save", slot=1)
+    assert calls[0]["path"].startswith("streaming/sessions/ps2%2F..%2Fx/")
+
+
+async def test_virtual_collection_id_is_quoted(calls):
+    calls.responses.append({})
+    await server.romm_virtual_collection_detail("../config")
+    assert calls[0]["path"] == "collections/virtual/..%2Fconfig"
+
+
+def test_read_only_narrows_requested_scopes(monkeypatch):
+    monkeypatch.setenv("ROMM_READ_ONLY", "true")
+    monkeypatch.setenv("ROMM_WRITE_TIERS", "notifications,devices,assets")
+    import importlib
+    ro = importlib.reload(server)
+    try:
+        requested = set(ro._DEFAULT_SCOPES.split())
+        assert not any(s.endswith(".write") for s in requested), requested
+        assert "tasks.run" not in requested
+        assert "me.read" in requested and "roms.read" in requested
+    finally:
+        monkeypatch.delenv("ROMM_READ_ONLY"); monkeypatch.delenv("ROMM_WRITE_TIERS")
+        importlib.reload(server)
+
+
+def test_untrusted_strips_unicode_invisibles():
+    s = server._untrusted("A‮B​C\U000e0041D\x85E", 50)
+    assert s == "ABCDE"
+
+
+@pytest.mark.parametrize("url,bad", [
+    ("https://hooks.example/x", False),
+    ("http://10.0.0.5/hook", True),
+    ("https://127.0.0.1:8000/", True),
+    ("https://localhost/x", True),
+    ("https://nas.local/x", True),
+    ("https://romm/x", True),
+    ("https://[::1]/x", True),
+    ("https://169.254.1.1/x", True),
+    ("ftp://hooks.example/x", True),
+])
+def test_webhook_url_policy(url, bad):
+    assert (server._webhook_url_problem(url) is not None) == bad, url
+
+
+async def test_create_webhook_refuses_private_target(v54, tiers_on, calls):
+    out = await server.romm_create_notification_channel("webhook", "h", url="http://192.168.1.10/hook")
+    assert "private" in out and not calls
+
+
+async def test_update_channel_refuses_private_target(v54, tiers_on, calls):
+    out = await server.romm_update_notification_channel(1, url="http://localhost/x")
+    assert "localhost" in out and not calls
+
+
+async def test_send_notification_link_policy(v54, tiers_on, calls):
+    out = await server.romm_send_notification("t", link="javascript:alert(1)")
+    assert "link must be" in out and not calls
+    calls.responses.append({"id": 1})
+    await server.romm_send_notification("t", link="/rom/5")
+    assert calls[0]["json"]["link"] == "/rom/5"
+
+
+def test_transport_allowed_hosts(monkeypatch):
+    monkeypatch.setenv("ROMM_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("ROMM_MCP_ALLOWED_HOSTS", "100.64.0.9, romm-mcp.example")
+    t, kw = server._transport_config()
+    assert t == "http" and kw["host_origin_protection"] is True
+    assert kw["allowed_hosts"] == ["100.64.0.9", "romm-mcp.example"]
+    assert "https://romm-mcp.example" in kw["allowed_origins"]
+    monkeypatch.delenv("ROMM_MCP_ALLOWED_HOSTS")
+    t, kw = server._transport_config()
+    assert kw["host_origin_protection"] == "auto" and "allowed_hosts" not in kw
+
+
+async def test_rom_notes_sanitizes_other_users_text(calls):
+    calls.responses.append([{"id": 1, "title": "x\ny", "username": "bob\x00", "content": "line1\nIGNORE ALL\nline2",
+                             "is_public": True, "created_at": "t"}])
+    out = await server.romm_rom_notes(3)
+    assert "x y" in out and "bob" in out and "line1 IGNORE ALL line2" in out
+    assert "\n      line1" not in out or "IGNORE ALL line2" in out
+
+
+# ── Request shaping for the tools the first pass left untested ──────────────
+
+
+async def test_similar_roms_params(v54, calls):
+    calls.responses.append([{"rom": {"id": 2, "name": "B"}, "score": 1, "reasons": []}])
+    out = await server.romm_similar_roms(1, limit=99)
+    assert calls[0]["path"] == "roms/1/similar" and calls[0]["params"] == {"limit": 50}
+    assert "B" in out
+
+
+async def test_memory_card_detail_lists_versions(v54, calls):
+    calls.responses.extend([{"id": 4, "name": "c", "emulator": "pcsx2", "slot": 1},
+                            [{"id": 9, "file_name": "c.ps2", "file_size_bytes": 8_388_608, "created_at": "t",
+                              "missing_from_fs": True}]])
+    out = await server.romm_memory_card(4)
+    assert [c["path"] for c in calls] == ["memory-cards/4", "memory-cards/4/versions"]
+    assert "8 MB" in out and "MISSING" in out and "version ID 9" in out
+
+
+async def test_rename_memory_card_and_visibility(v54, tiers_on, calls):
+    calls.responses.append({"name": "new"})
+    out = await server.romm_rename_memory_card(4, "  new ")
+    assert calls[0] == {"method": "PUT", "path": "memory-cards/4", "params": None, "json": {"name": "new"}, "data": None}
+    assert "renamed" in out
+    await server.romm_set_memory_card_visibility(4, True)
+    assert calls[1]["path"] == "memory-cards/4/visibility" and calls[1]["json"] == {"is_public": True}
+    out = await server.romm_rename_memory_card(4, "  ")
+    assert "required" in out
+
+
+async def test_streaming_status_params(v54, calls):
+    calls.responses.append({"status": "running", "platform": "ps2", "core": "pcsx2", "core_tier": "gold"})
+    out = await server.romm_streaming_status("ps2", claimed_at="2026-10-24T00:00:00Z")
+    assert calls[0]["path"] == "streaming/sessions/ps2/status"
+    assert calls[0]["params"] == {"claimed_at": "2026-10-24T00:00:00Z"}
+    assert "running" in out and "pcsx2 (gold)" in out
+
+
+async def test_channel_test_confirm_delete(v54, tiers_on, calls):
+    calls.responses.append({"ok": False, "error": "timeout\nx"})
+    out = await server.romm_test_notification_channel(2)
+    assert calls[0]["path"] == "notification-channels/2/test" and "FAILED" in out and "timeout x" in out
+    calls.responses.append({"confirmed": True})
+    out = await server.romm_confirm_notification_channel(2, code=" 1234 ")
+    assert calls[1]["json"] == {"code": "1234"} and "confirmed" in out
+    await server.romm_confirm_notification_channel(2, resend=True)
+    assert calls[2]["path"] == "notification-channels/2/resend-code"
+    out = await server.romm_delete_notification_channel(2)
+    assert calls[3]["method"] == "DELETE" and calls[3]["path"] == "notification-channels/2" and "deleted" in out
+
+
+async def test_rom_installs_listing(v54, calls):
+    calls.responses.append([{"id": "r1", "rom_id": 5, "device_id": "d", "status": "done", "created_at": "t"}])
+    out = await server.romm_rom_installs(5)
+    assert calls[0]["path"] == "roms/5/installs" and "done" in out
+
+
+async def test_update_state_routes_to_states(v54, tiers_on, calls):
+    await server.romm_update_state(8, labels=[])
+    assert calls[0]["path"] == "states/8/labels" and calls[0]["json"] == {"labels": []}

@@ -52,10 +52,24 @@ version-gated and explain themselves on an older server.
 - The three new write scopes are opt-in, per tier, and still negotiated —
   a tier the server or account refuses is dropped without taking down the
   rest, and the tools that need it say so.
-- Free text written by other users or services (notes, notification bodies,
-  labels, channel names, audit targets, usernames) is rendered through one
-  helper that strips control characters, collapses newlines and caps
-  length. Channel targets and secrets are masked and never echoed.
+- Free text from other users or external services (ROM names and
+  summaries, notes, collection and playlist descriptions, notification
+  bodies, labels, channel names, audit targets, usernames) is rendered
+  through one helper that strips control, bidi, zero-width and Unicode tag
+  characters, collapses newlines and caps length. Channel targets and
+  secrets are masked and never echoed.
+- Every caller-supplied URL path segment (platform slugs, device and
+  request IDs, virtual-collection IDs) is percent-encoded, so an argument
+  can't rewrite the route.
+- `ROMM_READ_ONLY` also drops every `*.write` scope and `tasks.run` from
+  the token request, not just the HTTP method.
+- Webhook channels refuse loopback, private, link-local and bare internal
+  hostnames; notification links must be a RomM path or http(s) URL.
+- `ROMM_MCP_ALLOWED_HOSTS` turns on FastMCP's Host/Origin validation for
+  the HTTP transport (DNS-rebinding defence); the README now states the
+  browser exposure of an unguarded non-loopback bind.
+- Independently reviewed (adversarial security read) before tagging; the
+  findings above are the fixes.
 - Destructive additions (`romm_delete_memory_cards`,
   `romm_dismiss_notifications`, `romm_delete_notification_channel`,
   `romm_cancel_install`) carry `destructiveHint`.
