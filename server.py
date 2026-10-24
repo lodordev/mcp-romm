@@ -1,15 +1,19 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 58 tools: 34 read-only for browsing, searching, and viewing metadata,
-plus 24 write tools for play status, play sessions, favorites, notes,
-collections (regular and smart), soundtrack favourites and playlists, and
-emulator-streaming sessions.
+Provides 92 tools: 50 read-only for browsing, searching, and viewing metadata,
+plus 42 write tools for play status, play sessions, favorites, notes,
+collections (regular and smart), soundtrack favourites and playlists,
+emulator-streaming sessions, and — behind opt-in tiers — notifications,
+device installs, and save/state/memory-card housekeeping.
 
-Targets RomM 5.0-5.2. Newer features are version-gated against /api/heartbeat
+Targets RomM 5.0-5.4. Newer features are version-gated against /api/heartbeat
 and say so rather than 404-ing: music favourites/playlists, emulator streaming
 and unscanned-platform-folder listing need 5.1+; the random ROM pick needs
-5.2+. Most other read tools still degrade gracefully on 4.4+.
+5.2+; recommendations, memory cards and the streaming container/join tools
+need 5.3+; notifications, device installs, audit events, save/state labels
+and collection visibility need 5.4+. Most read tools still degrade
+gracefully on 4.4+.
 
 Write tools change only your own user data (play status, favorites, notes,
 music favourites/playlists) and your own collections. No tool modifies ROM
@@ -43,21 +47,46 @@ Tool groups:
                  romm_delete_play_session
   Notes          romm_rom_notes, romm_add_note, romm_update_note,
                  romm_delete_note
-  Files & system romm_saves, romm_firmware, romm_devices, romm_tasks,
-                 romm_scan_library, romm_whoami, romm_metadata_search
-  Soundtracks    romm_music_tracks, romm_music_facets, romm_music_favorites,
+  Files & system romm_saves, romm_states, romm_firmware, romm_devices,
+                 romm_tasks, romm_scan_library, romm_whoami,
+                 romm_metadata_search, romm_update_save, romm_update_state,
+                 romm_set_collection_visibility, romm_audit_events
+  Discovery      romm_recommendations, romm_similar_roms (5.3+)
+  Memory cards   romm_memory_cards, romm_memory_card, romm_rename_memory_card,
+                 romm_set_memory_card_visibility, romm_delete_memory_cards (5.3+)
+  Notifications  romm_notifications, romm_mark_notifications_read,
+                 romm_dismiss_notifications, romm_send_notification,
+                 romm_notification_channels, romm_apprise_services,
+                 romm_create_notification_channel,
+                 romm_update_notification_channel,
+                 romm_delete_notification_channel,
+                 romm_test_notification_channel,
+                 romm_confirm_notification_channel (5.4+)
+  Devices        romm_device_installs, romm_rom_installs,
+                 romm_install_on_device, romm_cancel_install (5.4+)
+  Soundtracks    romm_music_tracks, romm_music_facets, romm_music_stats,
+                 romm_music_favorites,
                  romm_music_favorite, romm_music_playlists,
                  romm_music_playlist, romm_create_music_playlist,
                  romm_update_music_playlist, romm_delete_music_playlist,
                  romm_music_playlist_tracks
   Streaming      romm_streaming_config, romm_streaming_sessions,
                  romm_streaming_start, romm_streaming_state,
-                 romm_streaming_audio, romm_streaming_stop
+                 romm_streaming_audio, romm_streaming_stop,
+                 romm_streaming_containers, romm_streaming_joinable,
+                 romm_streaming_join, romm_streaming_status,
+                 romm_streaming_swap_disc, romm_streaming_state_picks
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
   ROMM_USERNAME         — RomM username (required)
-  ROMM_PASSWORD         — RomM password (required)
+  ROMM_PASSWORD         — RomM password (required unless ROMM_PASSWORD_FILE)
+  ROMM_PASSWORD_FILE    — Read the password from this file instead (first line)
+  ROMM_READ_ONLY        — "true" refuses every non-GET request at the HTTP
+                          boundary; write tools explain instead of acting
+  ROMM_WRITE_TIERS      — Comma list of opt-in write tiers, default none:
+                          notifications (me.write), devices (devices.write),
+                          assets (assets.write). See Security.
   ROMM_REQUEST_TIMEOUT  — Default request timeout in seconds (default: 30)
   ROMM_REQUEST_TIMEOUT_LONG — Timeout for slow endpoints (default: 60)
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
@@ -70,16 +99,35 @@ Security:
   - Least privilege: the token requests read scopes plus roms.user.write,
     collections.write, and the two optional tiers (tasks.run, playlists.*).
     It cannot modify ROM files, platforms, firmware, or other users, and it
-    cannot touch RomM save files.
+    cannot upload, download or delete RomM save files.
+  - Opt-in write tiers: me.write (notifications + channels), devices.write
+    (install on device) and assets.write (save/state labels, memory-card
+    rename/delete) are requested ONLY when listed in ROMM_WRITE_TIERS. Each
+    widens the token beyond "your own play data and collections" — me.write
+    in particular also covers profile edits in RomM — so they are off until
+    the operator turns them on.
+  - ROMM_READ_ONLY=true is a kill switch enforced in _request(): no non-GET
+    call leaves the process, whatever a tool was asked to do.
+  - Untrusted text (notes, notification bodies, labels, channel names, audit
+    targets, other users' names) is rendered through _untrusted(): control
+    characters stripped, newlines collapsed, length capped. Secret-bearing
+    channel targets are shown masked and never echoed back.
+  - romm_send_notification only ever posts to the caller's own inbox; the
+    API's recipient targeting is deliberately not exposed.
   - Tools that permanently destroy data (romm_delete_note,
     romm_delete_collection, romm_delete_smart_collection,
-    romm_delete_play_session, romm_delete_music_playlist) are labeled and
+    romm_delete_play_session, romm_delete_music_playlist,
+    romm_delete_memory_cards, romm_dismiss_notifications,
+    romm_delete_notification_channel, romm_cancel_install) are labeled and
     carry destructiveHint. So does romm_streaming_stop, which kills a
     running emulator.
-  - Deliberately NOT implemented, though RomM 5.1 exposes them: ROM-file
-    deletion (DELETE /roms/{id}/files/{id}) and scan-config writes
-    (PUT /config/scan). Both sit outside this server's boundary.
-  - Credentials are held in memory only, never written to disk.
+  - Deliberately NOT implemented, though RomM exposes them: ROM-file
+    deletion, scan-config writes, ROM uploads/physical ROMs/identity edits,
+    manuals/walkthroughs/screenshots/soundtrack uploads, memory-card and
+    save-file uploads/downloads, converto settings, and admin-targeted
+    notifications. All sit outside this server's boundary.
+  - Credentials are held in memory only, never written to disk; the password
+    may be read from a file (ROMM_PASSWORD_FILE) instead of the environment.
   - TLS verification is enabled by default.
 """
 
@@ -88,6 +136,7 @@ from __future__ import annotations
 import json as jsonlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -101,6 +150,19 @@ log = logging.getLogger("romm-mcp")
 # ── Config ───────────────────────────────────────────────────────────────
 
 
+_VALID_WRITE_TIERS = ("notifications", "devices", "assets")
+
+
+def _read_secret_file(path: str) -> str:
+    """Read a credential from a file (first line, stripped). Empty if unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError as e:
+        log.warning("Could not read ROMM_PASSWORD_FILE %s: %s", path, e)
+        return ""
+
+
 @dataclass(frozen=True)
 class Config:
     romm_url: str
@@ -109,13 +171,22 @@ class Config:
     request_timeout: int
     request_timeout_long: int
     tls_verify: bool
+    read_only: bool = False
+    write_tiers: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> Config:
         username = os.getenv("ROMM_USERNAME", "")
-        password = os.getenv("ROMM_PASSWORD", "")
+        password_file = os.getenv("ROMM_PASSWORD_FILE", "").strip()
+        password = _read_secret_file(password_file) if password_file else os.getenv("ROMM_PASSWORD", "")
         if not username or not password:
             log.warning("ROMM_USERNAME/ROMM_PASSWORD not set — all tools will fail")
+        raw_tiers = os.getenv("ROMM_WRITE_TIERS", "")
+        tiers = tuple(t for t in (x.strip().lower() for x in raw_tiers.split(",")) if t)
+        unknown = [t for t in tiers if t not in _VALID_WRITE_TIERS]
+        if unknown:
+            log.warning("ROMM_WRITE_TIERS: ignoring unknown tier(s) %s (valid: %s)",
+                        ", ".join(unknown), ", ".join(_VALID_WRITE_TIERS))
         return cls(
             romm_url=os.getenv("ROMM_URL", "http://localhost:3000").rstrip("/"),
             romm_username=username,
@@ -123,6 +194,8 @@ class Config:
             request_timeout=int(os.getenv("ROMM_REQUEST_TIMEOUT", "30")),
             request_timeout_long=int(os.getenv("ROMM_REQUEST_TIMEOUT_LONG", "60")),
             tls_verify=os.getenv("ROMM_TLS_VERIFY", "true").lower() in ("true", "1", "yes"),
+            read_only=os.getenv("ROMM_READ_ONLY", "false").lower() in ("true", "1", "yes"),
+            write_tiers=tuple(t for t in tiers if t in _VALID_WRITE_TIERS),
         )
 
     @property
@@ -190,6 +263,23 @@ _OPTIONAL_SCOPE_TIERS: dict[str, tuple[str, ...]] = {
     # RomM 5.1+ only — the scope does not exist on 5.0.
     "playlists": ("playlists.read", "playlists.write"),
 }
+
+# Opt-in write tiers (ROMM_WRITE_TIERS=notifications,devices,assets). Each one
+# widens what the token can do beyond "your own play data and collections", so
+# none is requested unless the operator asks for it:
+#   notifications — me.write: post to / clear the notification inbox and manage
+#                   delivery channels. me.write also covers profile edits in
+#                   RomM, which is exactly why it is off by default.
+#   devices       — devices.write: queue or cancel "install on device" requests.
+#   assets        — assets.write: rename/label/favourite saves and states, and
+#                   rename or delete memory cards (not upload or download them).
+_WRITE_TIER_SCOPES: dict[str, tuple[str, ...]] = {
+    "notifications": ("me.write",),
+    "devices": ("devices.write",),
+    "assets": ("assets.write",),
+}
+for _tier in cfg.write_tiers:
+    _OPTIONAL_SCOPE_TIERS[_tier] = _WRITE_TIER_SCOPES[_tier]
 
 # The full set we'd like, in canonical order. Kept as a single string because
 # that is what the OAuth form field takes.
@@ -363,6 +453,9 @@ async def _request(
     Use `json` for JSON bodies, `data` for url-encoded form fields (RomM's
     collection-create endpoint takes Form fields rather than JSON).
     """
+    if cfg.read_only and method.upper() != "GET":
+        raise RuntimeError(f"Read-only mode (ROMM_READ_ONLY=true): refusing {method.upper()} /api/{path.lstrip('/')}")
+
     client = _get_client()
     url = f"{cfg.romm_url}/api/{path.lstrip('/')}"
     req_timeout = cfg.request_timeout_long if long_timeout else cfg.request_timeout
@@ -431,6 +524,12 @@ async def _delete(path: str, body: dict | None = None) -> dict | list:
 # arrived in 5.1.0; /roms/random in 5.2.0.
 _V_5_1 = (5, 1, 0)
 _V_5_2 = (5, 2, 0)
+# 5.3.0: recommendations + similar ROMs, memory cards, soundtrack game/platform
+# facets + stats, streaming containers/joinable/status/join/swap-disc.
+_V_5_3 = (5, 3, 0)
+# 5.4.0: notifications + channels, device installs + online, audit events,
+# save/state favourite/labels/rename, collection visibility, POST /tasks/scan.
+_V_5_4 = (5, 4, 0)
 
 
 @dataclass
@@ -507,6 +606,59 @@ def _scope_gate(tier: str, feature: str) -> str | None:
                 f"account did not grant. Grant it in RomM and restart the "
                 f"MCP server.")
     return None
+
+
+def _write_gate(feature: str, tier: str | None = None) -> str | None:
+    """Refuse a write before any request leaves the process, when appropriate.
+
+    Two layers: ROMM_READ_ONLY turns every write tool into a polite no-op, and
+    the opt-in write tiers (ROMM_WRITE_TIERS) must list `tier` before a tool
+    in that tier will even ask RomM. Returns the explanation, or None to go
+    ahead. Scope negotiation (whether RomM actually *granted* the tier) is
+    checked separately by _scope_gate.
+    """
+    if cfg.read_only:
+        return (f"{feature} is disabled: this MCP server runs in read-only mode "
+                f"(ROMM_READ_ONLY=true).")
+    if tier and tier not in cfg.write_tiers:
+        return (f"{feature} is off by default. Enable it with "
+                f"ROMM_WRITE_TIERS={tier} (this grants the {', '.join(_WRITE_TIER_SCOPES[tier])} "
+                f"scope to the MCP's token) and restart the MCP server.")
+    if tier:
+        return _scope_gate(tier, feature)
+    return None
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _untrusted(text: object, limit: int = 300) -> str:
+    """Render free text written by other users or external services safely.
+
+    Notes, notification bodies, labels, channel names and audit targets are
+    content the model will read as data. This strips control characters,
+    collapses newlines so a value can't fake a new line of tool output, and
+    caps the length. It does not try to detect "instructions" — it just makes
+    sure untrusted text stays visibly inside its field.
+    """
+    s = "" if text is None else str(text)
+    s = _CONTROL_CHARS.sub("", s).replace("\r", " ").replace("\n", " ")
+    s = " ".join(s.split())
+    if len(s) > limit:
+        s = s[:limit].rstrip() + "…"
+    return s
+
+
+def _mask(value: object) -> str:
+    """Show that a secret-bearing value exists without echoing it."""
+    s = "" if value is None else str(value)
+    if not s:
+        return "(none)"
+    if "://" in s:
+        scheme, _, rest = s.partition("://")
+        host = rest.split("/", 1)[0].split("@")[-1]
+        return f"{scheme}://{host}/…"
+    return f"…{s[-4:]}" if len(s) > 8 else "(set)"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -600,10 +752,18 @@ async def romm_status() -> str:
                 lines.append(f"    Emulator streaming (5.1+):           {mark(ver >= _V_5_1)}")
                 lines.append(f"    Unscanned platform folders (5.1+):   {mark(ver >= _V_5_1)}")
                 lines.append(f"    Random ROM pick (5.2+):              {mark(ver >= _V_5_2)}")
+                lines.append(f"    Recommendations + memory cards (5.3+): {mark(ver >= _V_5_3)}")
+                lines.append(f"    Notifications, device installs, audit, "
+                             f"save labels (5.4+): {mark(ver >= _V_5_4)}")
         else:
             lines.append("  Connected: yes (unexpected response format)")
     except Exception as e:
         lines.append(f"  Status: UNREACHABLE — {e}")
+
+    lines.append("\n  Modes:")
+    lines.append(f"    Read-only: {'yes (ROMM_READ_ONLY)' if cfg.read_only else 'no'}")
+    lines.append(f"    Opt-in write tiers: "
+                 f"{', '.join(cfg.write_tiers) if cfg.write_tiers else 'none (set ROMM_WRITE_TIERS)'}")
 
     # Scope negotiation result — "not yet negotiated" is honest, not a failure.
     lines.append("\n  Scopes:")
@@ -1170,9 +1330,24 @@ async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
             line += f" slot {slot}"
         if size:
             line += f" — {_fmt_size(size)}"
+        if s.get("is_favorite"):
+            line += " *"
         lines.append(line)
         if updated:
             lines.append(f"    Updated: {updated}")
+        # RomM 5.4 adds labels, visibility and device-sync attribution.
+        labels = s.get("labels") or []
+        if labels:
+            lines.append(f"    Labels: {', '.join(_untrusted(l, 40) for l in labels[:10])}")
+        syncs = s.get("device_syncs") or []
+        if syncs:
+            current = [x.get("device_name") or x.get("device_id", "?") for x in syncs
+                       if isinstance(x, dict) and x.get("is_current")]
+            lines.append(f"    Synced by {len(syncs)} device(s)"
+                         + (f"; current on: {', '.join(_untrusted(c, 40) for c in current)}" if current else ""))
+        if s.get("is_public"):
+            lines.append("    Visibility: public")
+        lines.append(f"    ID: {s.get('id', '?')}")
 
     if len(data) > 50:
         lines.append(f"\n  ({len(data) - 50} more saves not shown)")
@@ -1310,32 +1485,55 @@ async def romm_firmware(platform_id: int = 0) -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 async def romm_devices() -> str:
-    """List registered devices (handhelds, emulators, etc.)."""
+    """List your registered devices (handhelds, launchers, browsers, RetroArch).
+
+    On RomM 5.4+ also shows which devices are online right now and whether a
+    device accepts "install on device" requests (see romm_install_on_device).
+    """
     data = await _get("devices")
 
     if not isinstance(data, list) or not data:
         return "No devices registered."
 
+    online: set[str] = set()
+    ver = await _server_version()
+    if ver is not None and ver >= _V_5_4:
+        try:
+            on = await _get("devices/online")
+            if isinstance(on, list):
+                online = {str(x) for x in on}
+        except RuntimeError as e:
+            log.debug("devices/online unavailable: %s", e)
+
     lines = [f"Devices ({len(data)}):\n"]
     for d in data:
-        name = d.get("name") or d.get("hostname", "Unknown")
+        name = _untrusted(d.get("name") or d.get("hostname") or "Unknown", 80)
         # 4.x had a free-form "type"; 5.0 devices carry client/platform/sync info.
         device_type = d.get("type", "")
         client = d.get("client", "")
+        client_version = d.get("client_version", "")
         platform = d.get("platform", "")
         last_seen = d.get("last_seen", "")
         sync_enabled = d.get("sync_enabled")
         device_id = d.get("id", "?")
+        caps = d.get("capabilities") or {}
+        accepts_installs = bool(caps.get("installs") or caps.get("accepts_installs")) if isinstance(caps, dict) else False
 
         line = f"  - {name}"
-        detail = device_type or " / ".join(x for x in (client, platform) if x)
+        detail = device_type or " / ".join(_untrusted(x, 40) for x in (client, platform) if x)
+        if client_version:
+            detail += f" {_untrusted(client_version, 30)}"
         if detail:
             line += f" ({detail})"
         if sync_enabled is not None:
             line += f" — sync {'on' if sync_enabled else 'off'}"
+        if str(device_id) in online:
+            line += " — ONLINE"
         lines.append(line)
         if last_seen:
             lines.append(f"    Last seen: {last_seen}")
+        if accepts_installs:
+            lines.append("    Accepts installs: yes")
         lines.append(f"    ID: {device_id}")
 
     return "\n".join(lines)
@@ -1406,16 +1604,50 @@ async def romm_tasks() -> str:
     return "\n".join(lines)
 
 
+_SCAN_TYPES = ("quick", "new_platforms", "update", "unmatched", "complete", "hashes")
+
+
 @mcp.tool(annotations=_WRITE)
-async def romm_scan_library() -> str:
-    """Trigger a library rescan to discover new ROMs and platforms.
+async def romm_scan_library(scan_type: str = "quick", platform_ids: list[int] | None = None) -> str:
+    """Trigger a library scan to discover new ROMs and platforms.
 
     This is a background task — it returns immediately. New ROMs will appear
     in the library as the scan progresses.
 
-    Note: RomM 5.0 marks scan_library as not manually runnable via the REST
-    tasks API — on 5.0 instances this tool reports that instead of scanning.
+    On RomM 5.4+ this uses the scan endpoint directly, so scan_type and
+    platform_ids apply. Older servers run the scheduled scan_library task,
+    which RomM 5.0-5.3 may refuse to start manually — the tool says so.
+
+    scan_type: "quick" (default: new files only), "new_platforms", "update"
+               (refresh metadata), "unmatched", "complete", or "hashes".
+    platform_ids: Restrict the scan to these platform IDs (default: all).
     """
+    gate = _write_gate("Scanning", None)
+    if gate:
+        return gate
+    scope_block = _scope_gate("tasks", "Scanning")
+    if scope_block:
+        return scope_block
+    scan_type = scan_type.strip().lower() or "quick"
+    if scan_type not in _SCAN_TYPES:
+        return f"scan_type must be one of: {', '.join(_SCAN_TYPES)}."
+
+    ver = await _server_version()
+    if ver is not None and ver >= _V_5_4:
+        body: dict = {"type": scan_type}
+        if platform_ids:
+            body["platforms"] = [int(p) for p in platform_ids]
+        data = await _post("tasks/scan", body, long_timeout=True)
+        if isinstance(data, dict) and data:
+            job_id = data.get("task_id") or data.get("id", "")
+            status = data.get("status", "started")
+            return f"{scan_type} scan started (job: {job_id}, status: {status})."
+        return f"{scan_type} scan started."
+
+    if scan_type != "quick" or platform_ids:
+        return ("scan_type and platform_ids need RomM 5.4 or newer — this server "
+                f"reports {_version.raw or 'an unknown version'}. Running the "
+                "scheduled scan_library task instead would ignore them, so nothing was started.")
     try:
         data = await _post("tasks/run/scan_library", long_timeout=True)
         if isinstance(data, dict):
@@ -2223,15 +2455,21 @@ async def romm_music_facets(field: str = "artists", search: str = "",
     Use this to see what's in the soundtrack library before filtering
     romm_music_tracks by an exact artist/album/genre/year.
 
-    field: "artists" (default), "albums", "genres", or "years".
+    field: "artists" (default), "albums", "genres", "years"; on RomM 5.3+
+           also "games", "platforms", "game-genres".
     search: Typeahead substring on the value.
     limit: Values to return (default 30, max 200).
     offset: Skip this many values.
     """
-    field = field.strip().lower()
+    field = field.strip().lower().replace("_", "-")
     valid = {"artists", "albums", "genres", "years"}
-    if field not in valid:
-        return f"field must be one of: {', '.join(sorted(valid))}."
+    valid_5_3 = {"games", "platforms", "game-genres"}
+    if field not in valid | valid_5_3:
+        return f"field must be one of: {', '.join(sorted(valid | valid_5_3))}."
+    if field in valid_5_3:
+        gate = await _version_gate(_V_5_3, f"The soundtrack {field} facet")
+        if gate:
+            return gate
 
     params: dict = {"limit": min(max(limit, 1), 200), "offset": max(offset, 0),
                     "order_by": "count", "order_dir": "desc"}
@@ -2247,7 +2485,14 @@ async def romm_music_facets(field: str = "artists", search: str = "",
     lines = [f"Soundtrack {field}"
              + (f" ({len(items)} of {total})" if total is not None else "") + ":\n"]
     for v in items:
-        lines.append(f"  {v.get('value', '?')} — {v.get('count', 0)} track(s)")
+        if field == "games":
+            lines.append(f"  {v.get('name', '?')} [{v.get('platform_name') or v.get('platform_slug', '?')}]"
+                         f" — {v.get('count', 0)} track(s)  (ROM ID {v.get('rom_id', '?')})")
+        elif field == "platforms":
+            lines.append(f"  {v.get('name') or v.get('value', '?')} — {v.get('count', 0)} track(s)"
+                         + (f"  (platform ID {v['platform_id']})" if v.get('platform_id') else ""))
+        else:
+            lines.append(f"  {v.get('value', '?')} — {v.get('count', 0)} track(s)")
     return "\n".join(lines)
 
 
@@ -2779,6 +3024,1090 @@ async def romm_platform_folders() -> str:
         lines.append(f"  {name} — folder: {p.get('fs_slug', '?')}, slug: {p.get('slug', '?')}")
     lines.append("\nRun romm_scan_library (or a scan from the web UI) to import them.")
     return "\n".join(lines)
+
+
+# ── Tools — Recommendations (RomM 5.3+) ──────────────────────────────────
+
+
+def _fmt_reasons(reasons: list | None) -> str:
+    out = []
+    for r in reasons or []:
+        if isinstance(r, dict):
+            facet = r.get("facet", "")
+            value = _untrusted(r.get("value", ""), 60)
+            out.append(f"{facet}: {value}" if facet else value)
+        else:
+            out.append(_untrusted(r, 60))
+    return "; ".join(out[:5])
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_recommendations(limit: int = 20, refresh: bool = False) -> str:
+    """Personal game recommendations from your play history and favourites (RomM 5.3+).
+
+    RomM rebuilds its recommendation index nightly; `refresh` asks it to
+    recompute your list now.
+
+    limit: Number of recommendations (default 20, max 50).
+    refresh: Recompute instead of serving the cached list.
+    """
+    gate = await _version_gate(_V_5_3, "Recommendations")
+    if gate:
+        return gate
+    params: dict = {"limit": min(max(limit, 1), 50)}
+    if refresh:
+        params["refresh"] = "true"
+    data = await _get("recommendations", params=params, long_timeout=refresh)
+    if not isinstance(data, list) or not data:
+        return ("No recommendations yet — RomM needs some play history or favourites "
+                "to work from, and the index rebuilds nightly (or pass refresh=true).")
+
+    lines = [f"Recommended for you ({len(data)}):\n"]
+    for i, rec in enumerate(data, 1):
+        rom = rec.get("rom") or {}
+        lines.extend(_fmt_rom_line(rom, i))
+        why = _fmt_reasons(rec.get("reasons"))
+        seed = rec.get("seed_rom_name")
+        tail = f"   Because: {why}" if why else ""
+        if seed:
+            tail += f" (seeded by {_untrusted(seed, 60)})" if tail else f"   Seeded by {_untrusted(seed, 60)}"
+        if tail:
+            lines.insert(len(lines) - 1, tail)
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_similar_roms(rom_id: int, limit: int = 10) -> str:
+    """Games in the library similar to a given ROM, with the reasons (RomM 5.3+).
+
+    rom_id: The seed ROM.
+    limit: Number of results (default 10, max 50).
+    """
+    gate = await _version_gate(_V_5_3, "Similar ROMs")
+    if gate:
+        return gate
+    data = await _get(f"roms/{rom_id}/similar", params={"limit": min(max(limit, 1), 50)})
+    if not isinstance(data, list) or not data:
+        return f"No similar games found for ROM {rom_id}."
+    lines = [f"Similar to ROM {rom_id} ({len(data)}):\n"]
+    for i, rec in enumerate(data, 1):
+        lines.extend(_fmt_rom_line(rec.get("rom") or {}, i))
+        why = _fmt_reasons(rec.get("reasons"))
+        if why:
+            lines.insert(len(lines) - 1, f"   Because: {why}")
+    return "\n".join(lines)
+
+
+# ── Tools — Memory cards (RomM 5.3+) ─────────────────────────────────────
+
+# Memory cards are whole-card save images (PS1/PS2-style) that RomM versions.
+# Read tools list and describe them; the write tools rename, re-flag and
+# delete. Uploading or downloading card images is deliberately not exposed —
+# that is binary file traffic, not something to route through a chat tool.
+
+
+def _fmt_memory_card(c: dict) -> list[str]:
+    name = _untrusted(c.get("name", "?"), 80)
+    emu = c.get("emulator", "?")
+    slot = c.get("slot")
+    line = f"  - {name} [{emu}]"
+    if slot is not None:
+        line += f" slot {slot}"
+    if c.get("is_public"):
+        line += " (public)"
+    owner = c.get("username")
+    if owner:
+        line += f" — by {_untrusted(owner, 40)}"
+    out = [line]
+    if c.get("platform_id"):
+        out.append(f"    Platform ID: {c['platform_id']}")
+    out.append(f"    Updated: {c.get('updated_at', '?')}")
+    out.append(f"    ID: {c.get('id', '?')}")
+    return out
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_memory_cards(emulator: str = "", include_shared: bool = False) -> str:
+    """List your memory cards, optionally plus cards other users made public (RomM 5.3+).
+
+    emulator: Filter by emulator name as RomM records it (e.g. "duckstation").
+    include_shared: Also list public cards from other users.
+    """
+    gate = await _version_gate(_V_5_3, "Memory cards")
+    if gate:
+        return gate
+    params: dict = {}
+    if emulator.strip():
+        params["emulator"] = emulator.strip()
+    mine = await _get("memory-cards", params=params)
+    lines: list[str] = []
+    mine = mine if isinstance(mine, list) else []
+    lines.append(f"Your memory cards ({len(mine)}):\n" if mine else "You have no memory cards.")
+    for c in mine:
+        lines.extend(_fmt_memory_card(c))
+    if include_shared:
+        shared = await _get("memory-cards/shared", params=params)
+        shared = shared if isinstance(shared, list) else []
+        lines.append(f"\nShared by others ({len(shared)}):\n" if shared else "\nNo shared memory cards.")
+        for c in shared:
+            lines.extend(_fmt_memory_card(c))
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_memory_card(card_id: int) -> str:
+    """Show one memory card and its version history (RomM 5.3+).
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    """
+    gate = await _version_gate(_V_5_3, "Memory cards")
+    if gate:
+        return gate
+    card = await _get(f"memory-cards/{card_id}")
+    if not isinstance(card, dict) or not card:
+        return f"Memory card {card_id} not found."
+    lines = ["Memory card:"] + _fmt_memory_card(card)
+    versions = await _get(f"memory-cards/{card_id}/versions")
+    versions = versions if isinstance(versions, list) else []
+    lines.append(f"\nVersions ({len(versions)}):")
+    for v in versions[:30]:
+        flag = " — MISSING from disk" if v.get("missing_from_fs") else ""
+        lines.append(f"  - {_untrusted(v.get('file_name', '?'), 80)} "
+                     f"({_fmt_size(v.get('file_size_bytes'))}), {v.get('created_at', '?')}{flag}"
+                     f"  [version ID {v.get('id', '?')}]")
+    if len(versions) > 30:
+        lines.append(f"  ({len(versions) - 30} older versions not shown)")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_rename_memory_card(card_id: int, name: str) -> str:
+    """Rename one of your memory cards (RomM 5.3+; needs ROMM_WRITE_TIERS=assets).
+
+    card_id: The memory card's ID.
+    name: The new display name.
+    """
+    gate = await _version_gate(_V_5_3, "Memory cards")
+    if gate:
+        return gate
+    gate = _write_gate("Renaming memory cards", "assets")
+    if gate:
+        return gate
+    name = name.strip()
+    if not name:
+        return "name is required."
+    data = await _put(f"memory-cards/{card_id}", {"name": name})
+    shown = _untrusted(data.get("name", name), 80) if isinstance(data, dict) else name
+    return f"Memory card {card_id} renamed to \"{shown}\"."
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_set_memory_card_visibility(card_id: int, is_public: bool) -> str:
+    """Make one of your memory cards public or private (RomM 5.3+; needs ROMM_WRITE_TIERS=assets).
+
+    card_id: The memory card's ID.
+    is_public: True to share it with other users, False to keep it to yourself.
+    """
+    gate = await _version_gate(_V_5_3, "Memory cards")
+    if gate:
+        return gate
+    gate = _write_gate("Changing memory card visibility", "assets")
+    if gate:
+        return gate
+    await _put(f"memory-cards/{card_id}/visibility", {"is_public": bool(is_public)})
+    return f"Memory card {card_id} is now {'public' if is_public else 'private'}."
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_delete_memory_cards(card_ids: list[int]) -> str:
+    """Permanently delete memory cards you own, with every stored version (RomM 5.3+; needs ROMM_WRITE_TIERS=assets).
+
+    This cannot be undone. Save data on those cards is gone from RomM.
+
+    card_ids: The memory card IDs to delete.
+    """
+    gate = await _version_gate(_V_5_3, "Memory cards")
+    if gate:
+        return gate
+    gate = _write_gate("Deleting memory cards", "assets")
+    if gate:
+        return gate
+    ids = sorted({int(i) for i in (card_ids or []) if int(i) > 0})
+    if not ids:
+        return "card_ids is required (one or more memory card IDs)."
+    await _post("memory-cards/delete", {"cards": ids})
+    return f"Deleted {len(ids)} memory card(s): {', '.join(str(i) for i in ids)}."
+
+
+# ── Tools — Soundtrack stats (RomM 5.3+) ─────────────────────────────────
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_music_stats() -> str:
+    """Soundtrack library totals — track count and total play length (RomM 5.3+)."""
+    gate = await _version_gate(_V_5_3, "Soundtrack stats")
+    if gate:
+        return gate
+    data = await _get("music/stats")
+    if not isinstance(data, dict):
+        return "No soundtrack stats available."
+    secs = data.get("total_duration_seconds") or 0
+    hours = secs / 3600
+    return (f"Soundtrack library: {data.get('total_tracks', 0)} tracks, "
+            f"{hours:.1f} hours of audio.")
+
+
+# ── Tools — Streaming additions (RomM 5.3/5.4) ───────────────────────────
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_containers() -> str:
+    """List every emulator-streaming container and what it is doing right now (RomM 5.3+).
+
+    RomM restricts this view to admins; a scoped service account gets a clear
+    "forbidden" back rather than data.
+    """
+    gate = await _version_gate(_V_5_3, "Streaming containers")
+    if gate:
+        return gate
+    try:
+        data = await _get("streaming/containers")
+    except RuntimeError as e:
+        if "403" in str(e):
+            return "Listing streaming containers is admin-only in RomM, and this account is not an admin."
+        raise
+    if not isinstance(data, dict):
+        return "Unexpected response from the streaming containers endpoint."
+    if not data.get("enabled"):
+        return "Emulator streaming is disabled on this server."
+    containers = data.get("containers") or []
+    if not containers:
+        return "Emulator streaming is enabled but no containers are configured."
+    lines = [f"Streaming containers ({len(containers)}):\n"]
+    for c in containers:
+        label = c.get("label") or c.get("name") or c.get("container", "?")
+        state = "draining" if c.get("draining") else ("configured" if c.get("configured") else "NOT configured")
+        lines.append(f"  {label} — {state}; platforms: {', '.join(c.get('platforms') or []) or '?'}"
+                     + ("; desktop capable" if c.get("supports_desktop") else ""))
+        sess = c.get("session")
+        if isinstance(sess, dict) and sess:
+            who = _untrusted(sess.get("username") or f"user {sess.get('user_id', '?')}", 40)
+            what = _untrusted(sess.get("rom_name") or ("desktop" if sess.get("desktop") else "?"), 80)
+            lines.append(f"     In use: {what} by {who} since {sess.get('claimed_at', '?')}")
+        else:
+            lines.append("     Idle")
+        lines.append(f"     Container key: {c.get('container', '?')}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_joinable(rom_id: int = 0) -> str:
+    """List streaming sessions you could join as a second player (RomM 5.3+).
+
+    rom_id: Only sessions running this ROM (0 = any).
+    """
+    gate = await _version_gate(_V_5_3, "Joinable streaming sessions")
+    if gate:
+        return gate
+    params: dict = {}
+    if rom_id:
+        params["rom_id"] = rom_id
+    data = await _get("streaming/sessions/joinable", params=params)
+    sessions = data.get("sessions", []) if isinstance(data, dict) else []
+    if not sessions:
+        return "No joinable streaming sessions right now."
+    lines = [f"Joinable sessions ({len(sessions)}):\n"]
+    for s in sessions:
+        lines.append(f"  {_untrusted(s.get('rom_name') or '?', 80)} "
+                     f"[{s.get('platform_display_name') or s.get('platform', '?')}] "
+                     f"— hosted by {_untrusted(s.get('host_username') or '?', 40)} "
+                     f"since {s.get('claimed_at', '?')}")
+        lines.append(f"     Platform slug: {s.get('platform', '?')}; container: {s.get('container', '?')}"
+                     + (f"; ROM ID {s['rom_id']}" if s.get("rom_id") else ""))
+    lines.append("\nJoin one with romm_streaming_join(platform, container).")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_streaming_join(platform: str, container: str = "") -> str:
+    """Join someone else's running streaming session as a second player (RomM 5.3+).
+
+    Returns the stream URL to open in a browser.
+
+    platform: Platform slug of the running session (from romm_streaming_joinable).
+    container: Container key when the platform has more than one (optional).
+    """
+    gate = await _version_gate(_V_5_3, "Joining streaming sessions")
+    if gate:
+        return gate
+    gate = _write_gate("Joining a streaming session", None)
+    if gate:
+        return gate
+    platform = platform.strip()
+    if not platform:
+        return "platform is required."
+    params: dict = {}
+    if container.strip():
+        params["container"] = container.strip()
+    try:
+        data = await _post(f"streaming/sessions/{platform}/join", params=params)
+    except RuntimeError as e:
+        if "404" in str(e):
+            return f"No joinable session for platform \"{platform}\"."
+        raise
+    if not isinstance(data, dict):
+        return "Unexpected response from the join endpoint."
+    return (f"Joined the {platform} session"
+            + (f" running {_untrusted(data.get('rom_name'), 80)}" if data.get("rom_name") else "")
+            + f". Open: {data.get('host', '?')}")
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_status(platform: str, claimed_at: str = "") -> str:
+    """Status of a streaming session — launching, extracting, running, ended (RomM 5.3+).
+
+    platform: Platform slug of the session.
+    claimed_at: The session's claim timestamp, to pin the check to one session (optional).
+    """
+    gate = await _version_gate(_V_5_3, "Streaming session status")
+    if gate:
+        return gate
+    platform = platform.strip()
+    if not platform:
+        return "platform is required."
+    params: dict = {}
+    if claimed_at.strip():
+        params["claimed_at"] = claimed_at.strip()
+    data = await _get(f"streaming/sessions/{platform}/status", params=params)
+    if not isinstance(data, dict):
+        return "Unexpected response from the status endpoint."
+    lines = [f"{platform} session: {data.get('status', '?')}"]
+    if data.get("extraction_phase"):
+        lines.append(f"  Extraction: {data['extraction_phase']}")
+    if data.get("core"):
+        lines.append(f"  Core: {data['core']}" + (f" ({data['core_tier']})" if data.get("core_tier") else ""))
+    if data.get("host"):
+        lines.append(f"  Stream host: {data['host']}")
+    term = data.get("termination")
+    if isinstance(term, dict) and term:
+        lines.append(f"  Ended: {_untrusted(term.get('reason') or term, 120)}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_streaming_swap_disc(platform: str, file_id: int, container: str = "") -> str:
+    """Swap the disc in a running multi-disc streaming session (RomM 5.3+).
+
+    platform: Platform slug of the running session.
+    file_id: The ROM file ID of the disc to insert (from romm_get_item's file list).
+    container: Container key when the platform has more than one (optional).
+    """
+    gate = await _version_gate(_V_5_3, "Disc swapping")
+    if gate:
+        return gate
+    gate = _write_gate("Swapping discs", None)
+    if gate:
+        return gate
+    platform = platform.strip()
+    if not platform or not file_id:
+        return "platform and file_id are required."
+    params: dict = {}
+    if container.strip():
+        params["container"] = container.strip()
+    data = await _post(f"streaming/sessions/{platform}/swap-disc", {"file_id": int(file_id)}, params=params)
+    status = data.get("status", "ok") if isinstance(data, dict) else "ok"
+    return f"Disc swap on {platform}: {status} (file {file_id})."
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_streaming_state_picks(rom_id: int) -> str:
+    """Which of a ROM's save states a streaming session can load (RomM 5.4+).
+
+    RomM reports two lists: states the emulator made natively, and states it
+    can convert ("pickable"). Anything else can't be loaded into a stream.
+
+    rom_id: The ROM.
+    """
+    gate = await _version_gate(_V_5_4, "Streaming state picks")
+    if gate:
+        return gate
+    data = await _get(f"streaming/states/{rom_id}")
+    if not isinstance(data, dict):
+        return "Unexpected response from the state picks endpoint."
+    native = data.get("native") or []
+    pickable = data.get("pickable") or []
+    if not native and not pickable:
+        return f"No loadable save states for ROM {rom_id} in a streaming session."
+    return (f"ROM {rom_id} loadable states — native: "
+            f"{', '.join(str(i) for i in native) or 'none'}; pickable: "
+            f"{', '.join(str(i) for i in pickable) or 'none'} (state IDs; see romm_states).")
+
+
+# ── Tools — Save states (RomM 5.0+) and save/state editing (5.4+) ────────
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_states(rom_id: int = 0, platform_id: int = 0) -> str:
+    """List save states (suspend points). Filter by ROM or platform.
+
+    rom_id: Filter to a specific ROM (0 = all).
+    platform_id: Filter to a specific platform (0 = all).
+    """
+    params: dict = {}
+    if rom_id:
+        params["rom_id"] = rom_id
+    if platform_id:
+        params["platform_id"] = platform_id
+    data = await _get("states", params=params)
+    if not isinstance(data, list) or not data:
+        qualifier = (f" for ROM {rom_id}" if rom_id else "") + (f" on platform {platform_id}" if platform_id else "")
+        return f"No save states found{qualifier}."
+    lines = [f"Save states ({len(data)}):\n"]
+    for s in data[:50]:
+        line = f"  - {_untrusted(s.get('file_name', '?'), 100)}"
+        if s.get("rom_id"):
+            line += f" (ROM {s['rom_id']})"
+        if s.get("emulator"):
+            line += f" [{s['emulator']}" + (f"/{s['core']}" if s.get("core") else "") + "]"
+        if s.get("file_size_bytes"):
+            line += f" — {_fmt_size(s['file_size_bytes'])}"
+        if s.get("is_favorite"):
+            line += " *"
+        lines.append(line)
+        if s.get("updated_at"):
+            lines.append(f"    Updated: {s['updated_at']}")
+        labels = s.get("labels") or []
+        if labels:
+            lines.append(f"    Labels: {', '.join(_untrusted(l, 40) for l in labels[:10])}")
+        if s.get("is_public"):
+            lines.append("    Visibility: public")
+        lines.append(f"    ID: {s.get('id', '?')}")
+    if len(data) > 50:
+        lines.append(f"\n  ({len(data) - 50} more states not shown)")
+    return "\n".join(lines)
+
+
+async def _edit_asset(kind: str, asset_id: int, favorite: bool | None, labels: list[str] | None,
+                      new_name: str) -> str:
+    """Shared body of romm_update_save / romm_update_state."""
+    gate = await _version_gate(_V_5_4, f"Editing {kind}s")
+    if gate:
+        return gate
+    gate = _write_gate(f"Editing {kind}s", "assets")
+    if gate:
+        return gate
+    done = []
+    if favorite is not None:
+        await _put(f"{kind}s/{asset_id}/favorite", {"is_favorite": bool(favorite)})
+        done.append("favourited" if favorite else "unfavourited")
+    if labels is not None:
+        clean = [_untrusted(l, 40) for l in labels if str(l).strip()]
+        await _put(f"{kind}s/{asset_id}/labels", {"labels": clean})
+        done.append(f"labels set to [{', '.join(clean)}]" if clean else "labels cleared")
+    if new_name.strip():
+        await _put(f"{kind}s/{asset_id}/file-name", {"file_name": new_name.strip()})
+        done.append(f"renamed to \"{_untrusted(new_name, 100)}\"")
+    if not done:
+        return "Nothing to update — pass favorite, labels, or new_name."
+    return f"{kind.capitalize()} {asset_id}: {'; '.join(done)}."
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_update_save(save_id: int, favorite: bool | None = None,
+                           labels: list[str] | None = None, new_name: str = "") -> str:
+    """Favourite, label, or rename one of your save files (RomM 5.4+; needs ROMM_WRITE_TIERS=assets).
+
+    Changes metadata only — the save's contents are never touched.
+
+    save_id: The save's ID (from romm_saves).
+    favorite: True/False to set the favourite flag (omit to leave it).
+    labels: Replace the label list (pass [] to clear; omit to leave it).
+    new_name: New file name (omit to leave it).
+    """
+    return await _edit_asset("save", save_id, favorite, labels, new_name)
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_update_state(state_id: int, favorite: bool | None = None,
+                            labels: list[str] | None = None, new_name: str = "") -> str:
+    """Favourite, label, or rename one of your save states (RomM 5.4+; needs ROMM_WRITE_TIERS=assets).
+
+    Changes metadata only — the state's contents are never touched.
+
+    state_id: The state's ID (from romm_states).
+    favorite: True/False to set the favourite flag (omit to leave it).
+    labels: Replace the label list (pass [] to clear; omit to leave it).
+    new_name: New file name (omit to leave it).
+    """
+    return await _edit_asset("state", state_id, favorite, labels, new_name)
+
+
+# ── Tools — Collection visibility (RomM 5.4+) ────────────────────────────
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_set_collection_visibility(collection_id: int, is_public: bool, smart: bool = False) -> str:
+    """Make one of your collections public or private (RomM 5.4+).
+
+    collection_id: The collection's ID.
+    is_public: True to share it with other users, False to keep it private.
+    smart: True if this is a smart collection ID rather than a regular one.
+    """
+    gate = await _version_gate(_V_5_4, "Collection visibility")
+    if gate:
+        return gate
+    gate = _write_gate("Changing collection visibility", None)
+    if gate:
+        return gate
+    path = f"collections/smart/{collection_id}/visibility" if smart else f"collections/{collection_id}/visibility"
+    await _put(path, {"is_public": bool(is_public)})
+    return (f"{'Smart collection' if smart else 'Collection'} {collection_id} is now "
+            f"{'public' if is_public else 'private'}.")
+
+
+# ── Tools — Notifications (RomM 5.4+) ────────────────────────────────────
+
+_NOTIFICATION_LEVELS = ("info", "success", "warning", "error")
+_CHANNEL_MIN_LEVELS = ("info", "warning", "error")
+_CHANNEL_TYPES = ("webhook", "email", "apprise")
+_CHANNEL_TOPICS = ("scans", "tasks", "streaming", "devices", "account", "custom")
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_notifications(unread_only: bool = False, limit: int = 30) -> str:
+    """Your RomM notification inbox — finished scans and tasks, device installs, role changes (RomM 5.4+).
+
+    unread_only: Hide notifications you've already read.
+    limit: Newest N to show (default 30, max 100).
+    """
+    gate = await _version_gate(_V_5_4, "Notifications")
+    if gate:
+        return gate
+    data = await _get("notifications")
+    if not isinstance(data, list):
+        return "Unexpected response from the notifications endpoint."
+    items = [n for n in data if not (unread_only and n.get("read_at"))]
+    if not items:
+        return "No unread notifications." if unread_only else "Your inbox is empty."
+    limit = min(max(limit, 1), 100)
+    lines = [f"Notifications ({len(items)}{', unread only' if unread_only else ''}):\n"]
+    for n in items[:limit]:
+        flag = "  " if n.get("read_at") else "* "
+        level = n.get("level", "info")
+        title = _untrusted(n.get("title") or n.get("kind") or "?", 120)
+        lines.append(f"{flag}[{level}] {title}  ({n.get('created_at', '?')})")
+        if n.get("body"):
+            lines.append(f"     {_untrusted(n['body'], 240)}")
+        actor = n.get("actor")
+        if isinstance(actor, dict) and actor.get("username"):
+            lines.append(f"     From: {_untrusted(actor['username'], 40)}")
+        if n.get("link"):
+            lines.append(f"     Link: {_untrusted(n['link'], 160)}")
+        lines.append(f"     ID: {n.get('id', '?')}")
+    if len(items) > limit:
+        lines.append(f"\n  ({len(items) - limit} more not shown)")
+    lines.append("\n* = unread. Mark read with romm_mark_notifications_read; dismiss with romm_dismiss_notifications.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_mark_notifications_read(notification_ids: list[int] | None = None) -> str:
+    """Mark notifications read — specific IDs, or your whole inbox (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    notification_ids: IDs to mark read. Omit to mark everything read.
+    """
+    gate = await _version_gate(_V_5_4, "Notifications")
+    if gate:
+        return gate
+    gate = _write_gate("Marking notifications read", "notifications")
+    if gate:
+        return gate
+    ids = sorted({int(i) for i in (notification_ids or []) if int(i) > 0})
+    await _post("notifications/read", {"ids": ids} if ids else {})
+    return f"Marked {len(ids)} notification(s) read." if ids else "Marked all notifications read."
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_dismiss_notifications(notification_ids: list[int] | None = None) -> str:
+    """Delete notifications from your inbox — specific IDs, or all of them (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    Dismissed notifications are gone; this does not undo what they reported.
+
+    notification_ids: IDs to dismiss. Omit to clear the whole inbox.
+    """
+    gate = await _version_gate(_V_5_4, "Notifications")
+    if gate:
+        return gate
+    gate = _write_gate("Dismissing notifications", "notifications")
+    if gate:
+        return gate
+    ids = sorted({int(i) for i in (notification_ids or []) if int(i) > 0})
+    if ids:
+        for nid in ids:
+            await _delete(f"notifications/{nid}")
+        return f"Dismissed {len(ids)} notification(s)."
+    await _delete("notifications")
+    return "Dismissed all notifications."
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_send_notification(title: str, body: str = "", level: str = "info", link: str = "") -> str:
+    """Post a custom notification to your own RomM inbox (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    It lands in the inbox, is pushed to any open RomM tab, and is forwarded to
+    whichever channels you've configured (romm_notification_channels). Only
+    your own account receives it — this tool never targets other users.
+
+    title: Headline (required).
+    body: Longer text (optional).
+    level: "info" (default), "success", "warning", or "error".
+    link: URL or RomM path to attach (optional).
+    """
+    gate = await _version_gate(_V_5_4, "Notifications")
+    if gate:
+        return gate
+    gate = _write_gate("Sending notifications", "notifications")
+    if gate:
+        return gate
+    title = title.strip()
+    if not title:
+        return "title is required."
+    level = level.strip().lower() or "info"
+    if level not in _NOTIFICATION_LEVELS:
+        return f"level must be one of: {', '.join(_NOTIFICATION_LEVELS)}."
+    payload: dict = {"title": title[:200], "level": level, "kind": "custom"}
+    if body.strip():
+        payload["body"] = body.strip()[:2000]
+    if link.strip():
+        payload["link"] = link.strip()[:500]
+    data = await _post("notifications", payload)
+    nid = data.get("id") if isinstance(data, dict) else None
+    return f"Notification sent{f' (ID {nid})' if nid else ''}: {_untrusted(title, 120)}"
+
+
+def _fmt_channel(c: dict) -> list[str]:
+    name = _untrusted(c.get("name", "?"), 80)
+    ctype = c.get("type", "?")
+    state = "enabled" if c.get("enabled") else "disabled"
+    if ctype == "email" and not c.get("confirmed"):
+        state += ", UNCONFIRMED"
+    out = [f"  - {name} [{ctype}] — {state}; min level {c.get('min_level', '?')}"]
+    topics = c.get("topics")
+    out.append(f"    Topics: {', '.join(topics) if topics else 'all'}")
+    if ctype == "apprise":
+        out.append(f"    Service: {_untrusted(c.get('service_name') or c.get('service') or '?', 60)}")
+    else:
+        out.append(f"    Target: {_mask(c.get('target'))}"
+                   + (" (secret set)" if c.get("has_secret") else ""))
+    if c.get("last_delivered_at"):
+        out.append(f"    Last delivered: {c['last_delivered_at']}")
+    if c.get("last_error"):
+        out.append(f"    Last error: {_untrusted(c['last_error'], 160)} "
+                   f"({c.get('consecutive_failures', 0)} consecutive failures)")
+    out.append(f"    ID: {c.get('id', '?')}")
+    return out
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_notification_channels() -> str:
+    """List where your notifications get forwarded — webhooks, email, Apprise services (RomM 5.4+).
+
+    Targets and secrets are shown masked.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    data = await _get("notification-channels")
+    if not isinstance(data, list) or not data:
+        return "No notification channels configured. Create one with romm_create_notification_channel."
+    lines = [f"Notification channels ({len(data)}):\n"]
+    for c in data:
+        lines.extend(_fmt_channel(c))
+    return "\n".join(lines)
+
+
+def _parse_topics(topics: list[str] | None) -> list[str] | str:
+    if topics is None:
+        return []
+    clean = [t.strip().lower() for t in topics if str(t).strip()]
+    bad = [t for t in clean if t not in _CHANNEL_TOPICS]
+    if bad:
+        return f"Unknown topic(s): {', '.join(bad)}. Valid: {', '.join(_CHANNEL_TOPICS)}."
+    return clean
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_create_notification_channel(channel_type: str, name: str, url: str = "",
+                                           address: str = "", secret: str = "",
+                                           service: str = "", fields_json: str = "",
+                                           min_level: str = "info",
+                                           topics: list[str] | None = None) -> str:
+    """Add a delivery channel for your notifications (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    channel_type: "webhook" (needs url; optional secret for HMAC signing),
+                  "email" (needs address; RomM emails a confirmation code —
+                  finish with romm_confirm_notification_channel), or
+                  "apprise" (needs service + fields_json, see
+                  romm_apprise_services).
+    name: A label for the channel.
+    url / address / secret / service / fields_json: Per channel_type above.
+          fields_json is a JSON object of the Apprise service's fields.
+    min_level: Lowest level to forward: "info" (default), "warning", "error".
+    topics: Restrict to these topics (scans, tasks, streaming, devices,
+            account, custom). Omit for all.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    gate = _write_gate("Creating notification channels", "notifications")
+    if gate:
+        return gate
+    channel_type = channel_type.strip().lower()
+    if channel_type not in _CHANNEL_TYPES:
+        return f"channel_type must be one of: {', '.join(_CHANNEL_TYPES)}."
+    name = name.strip()
+    if not name:
+        return "name is required."
+    min_level = min_level.strip().lower() or "info"
+    if min_level not in _CHANNEL_MIN_LEVELS:
+        return f"min_level must be one of: {', '.join(_CHANNEL_MIN_LEVELS)}."
+    parsed_topics = _parse_topics(topics)
+    if isinstance(parsed_topics, str):
+        return parsed_topics
+
+    payload: dict = {"type": channel_type, "name": name[:100], "min_level": min_level}
+    if parsed_topics:
+        payload["topics"] = parsed_topics
+    if channel_type == "webhook":
+        if not url.strip().lower().startswith(("http://", "https://")):
+            return "url is required for a webhook channel and must start with http:// or https://."
+        payload["url"] = url.strip()
+        if secret.strip():
+            payload["secret"] = secret.strip()
+    elif channel_type == "email":
+        if "@" not in address:
+            return "address is required for an email channel."
+        payload["address"] = address.strip()
+    else:
+        if not service.strip():
+            return "service is required for an Apprise channel (see romm_apprise_services)."
+        try:
+            fields = jsonlib.loads(fields_json) if fields_json.strip() else {}
+        except ValueError as e:
+            return f"fields_json is not valid JSON: {e}"
+        if not isinstance(fields, dict):
+            return "fields_json must be a JSON object."
+        payload["service"] = service.strip()
+        payload["fields"] = fields
+
+    data = await _post("notification-channels", payload)
+    if isinstance(data, dict) and data.get("id"):
+        tail = ""
+        if channel_type == "email":
+            tail = " RomM sent a confirmation code to that address — pass it to romm_confirm_notification_channel."
+        return f"Channel \"{_untrusted(name, 80)}\" created (ID {data['id']}).{tail}"
+    return f"Channel \"{_untrusted(name, 80)}\" created."
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_apprise_services(search: str = "") -> str:
+    """List the Apprise services RomM can deliver notifications to, with their fields (RomM 5.4+).
+
+    search: Substring filter on the service name (e.g. "discord", "telegram").
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    data = await _get("notification-channels/apprise-services")
+    if not isinstance(data, list) or not data:
+        return "No Apprise services reported by the server."
+    needle = search.strip().lower()
+    items = [s for s in data if not needle or needle in str(s.get("name", "")).lower()
+             or needle in str(s.get("id", "")).lower()]
+    if not items:
+        return f"No Apprise services match \"{search}\"."
+    lines = [f"Apprise services ({len(items)}" + (f" of {len(data)}" if needle else "") + "):\n"]
+    for s in items[:60]:
+        req = [f.get("key") for f in (s.get("fields") or []) if isinstance(f, dict) and f.get("required")]
+        lines.append(f"  {s.get('name', '?')} — service id \"{s.get('id', '?')}\""
+                     + (f"; required fields: {', '.join(req)}" if req else ""))
+    if len(items) > 60:
+        lines.append(f"  ({len(items) - 60} more — narrow with search)")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def romm_update_notification_channel(channel_id: int, name: str = "", enabled: bool | None = None,
+                                           min_level: str = "", topics: list[str] | None = None,
+                                           url: str = "", address: str = "", secret: str = "") -> str:
+    """Change a notification channel's name, on/off state, level, topics, or target (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    Only the arguments you pass are changed.
+
+    channel_id: The channel's ID (from romm_notification_channels).
+    name / enabled / min_level / topics / url / address / secret: New values.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    gate = _write_gate("Updating notification channels", "notifications")
+    if gate:
+        return gate
+    payload: dict = {}
+    if name.strip():
+        payload["name"] = name.strip()[:100]
+    if enabled is not None:
+        payload["enabled"] = bool(enabled)
+    if min_level.strip():
+        lvl = min_level.strip().lower()
+        if lvl not in _CHANNEL_MIN_LEVELS:
+            return f"min_level must be one of: {', '.join(_CHANNEL_MIN_LEVELS)}."
+        payload["min_level"] = lvl
+    if topics is not None:
+        parsed = _parse_topics(topics)
+        if isinstance(parsed, str):
+            return parsed
+        payload["topics"] = parsed or None
+    if url.strip():
+        if not url.strip().lower().startswith(("http://", "https://")):
+            return "url must start with http:// or https://."
+        payload["url"] = url.strip()
+    if address.strip():
+        payload["address"] = address.strip()
+    if secret.strip():
+        payload["secret"] = secret.strip()
+    if not payload:
+        return "Nothing to update — pass at least one field."
+    await _request("PATCH", f"notification-channels/{channel_id}", json=payload)
+    changed = ", ".join(k for k in payload if k != "secret") + (", secret" if "secret" in payload else "")
+    return f"Channel {channel_id} updated ({changed})."
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_delete_notification_channel(channel_id: int) -> str:
+    """Remove a notification channel (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    channel_id: The channel's ID.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    gate = _write_gate("Deleting notification channels", "notifications")
+    if gate:
+        return gate
+    await _delete(f"notification-channels/{channel_id}")
+    return f"Channel {channel_id} deleted."
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_test_notification_channel(channel_id: int) -> str:
+    """Send a test message through a notification channel and report whether it delivered (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    channel_id: The channel's ID.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    gate = _write_gate("Testing notification channels", "notifications")
+    if gate:
+        return gate
+    data = await _post(f"notification-channels/{channel_id}/test", long_timeout=True)
+    if isinstance(data, dict):
+        if data.get("ok"):
+            return f"Channel {channel_id}: test delivered."
+        return f"Channel {channel_id}: test FAILED — {_untrusted(data.get('error') or 'no detail', 200)}"
+    return f"Channel {channel_id}: test sent (no result reported)."
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_confirm_notification_channel(channel_id: int, code: str = "", resend: bool = False) -> str:
+    """Confirm an email channel with the code RomM mailed you, or ask for a new code (RomM 5.4+; needs ROMM_WRITE_TIERS=notifications).
+
+    channel_id: The channel's ID.
+    code: The confirmation code from the email.
+    resend: True to have RomM send a fresh code instead.
+    """
+    gate = await _version_gate(_V_5_4, "Notification channels")
+    if gate:
+        return gate
+    gate = _write_gate("Confirming notification channels", "notifications")
+    if gate:
+        return gate
+    if resend:
+        await _post(f"notification-channels/{channel_id}/resend-code")
+        return f"A new confirmation code was sent for channel {channel_id}."
+    code = code.strip()
+    if not code:
+        return "code is required (or pass resend=true for a new one)."
+    data = await _post(f"notification-channels/{channel_id}/confirm", {"code": code})
+    confirmed = data.get("confirmed") if isinstance(data, dict) else None
+    return (f"Channel {channel_id} confirmed." if confirmed
+            else f"Channel {channel_id}: confirmation not reported as successful — check the code.")
+
+
+# ── Tools — Device installs (RomM 5.4+) ──────────────────────────────────
+
+# "Install on device" queues a game for a device app (Argosy, Grout, …) to
+# download the next time it checks in. RomM only accepts requests for the
+# caller's own devices, and only for apps that report they accept installs.
+
+
+def _fmt_install(r: dict) -> str:
+    line = (f"  - request {r.get('id', '?')}: ROM {r.get('rom_id', '?')} → device "
+            f"{r.get('device_id', '?')} — {r.get('status', '?')}")
+    if r.get("reason"):
+        line += f" ({_untrusted(r['reason'], 120)})"
+    line += f"  [{r.get('updated_at') or r.get('created_at', '?')}]"
+    return line
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_device_installs(device_id: str) -> str:
+    """List install requests queued for one of your devices, with their status (RomM 5.4+).
+
+    device_id: The device's ID (from romm_devices).
+    """
+    gate = await _version_gate(_V_5_4, "Device installs")
+    if gate:
+        return gate
+    device_id = device_id.strip()
+    if not device_id:
+        return "device_id is required."
+    data = await _get(f"devices/{device_id}/installs")
+    if not isinstance(data, list) or not data:
+        return f"No install requests for device {device_id}."
+    lines = [f"Install requests for device {device_id} ({len(data)}):\n"]
+    lines.extend(_fmt_install(r) for r in data[:50])
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_rom_installs(rom_id: int) -> str:
+    """Which of your devices a ROM has been sent to, and how that went (RomM 5.4+).
+
+    rom_id: The ROM.
+    """
+    gate = await _version_gate(_V_5_4, "Device installs")
+    if gate:
+        return gate
+    data = await _get(f"roms/{rom_id}/installs")
+    if not isinstance(data, list) or not data:
+        return f"ROM {rom_id} has not been sent to any device."
+    lines = [f"Install requests for ROM {rom_id} ({len(data)}):\n"]
+    lines.extend(_fmt_install(r) for r in data[:50])
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE)
+async def romm_install_on_device(device_id: str, rom_id: int) -> str:
+    """Send a game to one of your devices — it downloads next time the device is online (RomM 5.4+; needs ROMM_WRITE_TIERS=devices).
+
+    Only works for devices whose app accepts installs (romm_devices shows
+    "Accepts installs: yes"). The device gets the ROM's own files plus any
+    updates/DLC in its folder.
+
+    device_id: The device's ID (from romm_devices).
+    rom_id: The ROM to send.
+    """
+    gate = await _version_gate(_V_5_4, "Device installs")
+    if gate:
+        return gate
+    gate = _write_gate("Installing on devices", "devices")
+    if gate:
+        return gate
+    device_id = device_id.strip()
+    if not device_id or not rom_id:
+        return "device_id and rom_id are required."
+    try:
+        data = await _post(f"devices/{device_id}/installs", {"rom_id": int(rom_id)})
+    except RuntimeError as e:
+        msg = str(e)
+        if "404" in msg:
+            return f"Device {device_id} or ROM {rom_id} not found (or the device is not yours)."
+        if "409" in msg or "already" in msg.lower():
+            return f"ROM {rom_id} is already queued or installed on device {device_id}."
+        raise
+    rid = data.get("id") if isinstance(data, dict) else None
+    status = data.get("status", "pending") if isinstance(data, dict) else "pending"
+    return (f"Queued ROM {rom_id} for device {device_id}"
+            + (f" (request {rid}, {status})" if rid else "")
+            + ". The device picks it up the next time it checks in.")
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def romm_cancel_install(device_id: str, request_id: str) -> str:
+    """Cancel a pending install request before the device takes it (RomM 5.4+; needs ROMM_WRITE_TIERS=devices).
+
+    device_id: The device's ID.
+    request_id: The install request's ID (from romm_device_installs).
+    """
+    gate = await _version_gate(_V_5_4, "Device installs")
+    if gate:
+        return gate
+    gate = _write_gate("Cancelling installs", "devices")
+    if gate:
+        return gate
+    device_id, request_id = device_id.strip(), request_id.strip()
+    if not device_id or not request_id:
+        return "device_id and request_id are required."
+    await _delete(f"devices/{device_id}/installs/{request_id}")
+    return f"Install request {request_id} on device {device_id} cancelled."
+
+
+# ── Tools — Audit events (RomM 5.4+) ─────────────────────────────────────
+
+_AUDIT_CATEGORIES = ("consumption", "library", "collections", "operations", "security")
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def romm_audit_events(action: str = "", category: str = "", target_type: str = "",
+                            search: str = "", since: str = "", until: str = "",
+                            limit: int = 50, offset: int = 0) -> str:
+    """Your account's audit trail — logins, downloads, plays, collection edits (RomM 5.4+).
+
+    RomM scopes this to what your account may see: your own events for an
+    ordinary user, everyone's for an admin.
+
+    action: Filter by action, e.g. "rom.download", "auth.login", "collection.edit".
+    category: "consumption", "library", "collections", "operations", or "security".
+    target_type: e.g. "rom", "collection", "user".
+    search: Free-text match on target names.
+    since / until: ISO timestamps bounding the window.
+    limit: Events per page (default 50, max 200). offset: Skip this many.
+    """
+    gate = await _version_gate(_V_5_4, "Audit events")
+    if gate:
+        return gate
+    params: dict = {"limit": min(max(limit, 1), 200), "offset": max(offset, 0)}
+    if action.strip():
+        params["action"] = [a.strip() for a in action.split(",") if a.strip()]
+    if category.strip():
+        cat = category.strip().lower()
+        if cat not in _AUDIT_CATEGORIES:
+            return f"category must be one of: {', '.join(_AUDIT_CATEGORIES)}."
+        params["category"] = [cat]
+    for key, val in (("target_type", target_type), ("search", search), ("since", since), ("until", until)):
+        if val.strip():
+            params[key] = val.strip()
+    data = await _get("audit-events", params=params)
+    items = data.get("items", []) if isinstance(data, dict) else []
+    total = data.get("total") if isinstance(data, dict) else None
+    if not items:
+        return "No audit events match."
+    lines = [f"Audit events ({len(items)}" + (f" of {total}" if total is not None else "") + "):\n"]
+    for e in items:
+        who = _untrusted(e.get("actor_name") or e.get("actor_kind") or "?", 40)
+        target = _untrusted(e.get("target_name") or e.get("target_id") or "", 80)
+        line = f"  {e.get('occurred_at', '?')}  {e.get('action', '?')}  by {who}"
+        if target:
+            line += f" → {e.get('target_type', '')} {target}".rstrip()
+        if e.get("device_name"):
+            line += f"  (device {_untrusted(e['device_name'], 40)})"
+        lines.append(line)
+    if total is not None and offset + len(items) < total:
+        lines.append(f"\n  More: offset={offset + len(items)}")
+    return "\n".join(lines)
+
 
 
 def _transport_config() -> tuple[str, dict]:

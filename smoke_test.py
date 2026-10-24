@@ -510,13 +510,63 @@ async def write_tools(ctx: dict) -> None:
     out = await tool_out("romm_scan_library", server.romm_scan_library())
     if out is not None:
         check("romm_scan_library",
-              any(s in out for s in ("triggered", "not enabled",
-                                     "refuses manually triggered")), out)
+              any(s in out for s in ("triggered", "started", "not enabled",
+                                     "refuses manually triggered", "tasks scope")), out)
+
+
+async def read_tools_54(ctx: dict) -> None:
+    """Read side of the 1.4.0 clusters. Every one is version-gated, so on an
+    older server a clean gate message counts as a pass."""
+    rom_a = ctx.get("rom_a")
+
+    for name, coro in (
+        ("romm_recommendations", server.romm_recommendations(limit=5)),
+        ("romm_similar_roms", server.romm_similar_roms(rom_a, limit=5) if rom_a else None),
+        ("romm_memory_cards", server.romm_memory_cards(include_shared=True)),
+        ("romm_music_stats", server.romm_music_stats()),
+        ("romm_music_facets (games)", server.romm_music_facets(field="games", limit=5)),
+        ("romm_streaming_containers", server.romm_streaming_containers()),
+        ("romm_streaming_joinable", server.romm_streaming_joinable()),
+        ("romm_streaming_state_picks", server.romm_streaming_state_picks(rom_a) if rom_a else None),
+        ("romm_states", server.romm_states()),
+        ("romm_notifications", server.romm_notifications(limit=5)),
+        ("romm_notification_channels", server.romm_notification_channels()),
+        ("romm_apprise_services", server.romm_apprise_services(search="discord")),
+        ("romm_rom_installs", server.romm_rom_installs(rom_a) if rom_a else None),
+        ("romm_audit_events", server.romm_audit_events(limit=5)),
+    ):
+        if coro is None:
+            print(f"SKIP  {name} — no ROM id captured")
+            continue
+        out = await tool_out(name, coro)
+        if out is not None:
+            check(name, looks_ok(out) or _gated(out) or "admin-only" in out, out)
+
+    # Device-scoped reads need a device id; take the first one listed.
+    out = await tool_out("romm_devices", server.romm_devices())
+    if out is not None:
+        m = re.search(r"ID: (\S+)", out)
+        if m:
+            out2 = await tool_out("romm_device_installs", server.romm_device_installs(m.group(1)))
+            if out2 is not None:
+                check("romm_device_installs", looks_ok(out2) or _gated(out2), out2)
+        else:
+            print("SKIP  romm_device_installs — no devices registered")
+
+    # Gates that must refuse BEFORE any request: tiers off by default.
+    if "notifications" not in server.cfg.write_tiers:
+        out = await server.romm_send_notification("smoke")
+        check("write tier refused (notifications off)", "ROMM_WRITE_TIERS" in out, out)
+    if "assets" not in server.cfg.write_tiers:
+        out = await server.romm_update_save(1, favorite=True)
+        check("write tier refused (assets off)", "ROMM_WRITE_TIERS" in out, out)
 
 
 async def main() -> int:
     print(f"mcp-romm live e2e — {server.cfg.romm_url}\n")
     ctx = await read_tools()
+    print("\n-- 1.4.0 read tools --\n")
+    await read_tools_54(ctx)
     print(f"\n-- write tools (RomM {ctx.get('version', '?')}) --\n")
     await write_tools(ctx)
     print(f"\n{PASS} passed, {FAIL} failed"

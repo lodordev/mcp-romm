@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.4.0
+
+RomM 5.3 and 5.4 parity — 34 new tools (92 total), three opt-in write tiers,
+a read-only kill switch, and an output-hardening pass.
+
+The RomM API stays purely additive from 5.2.0 to 5.4.1 (routes added, none
+removed or changed), so every existing tool keeps working; the new ones are
+version-gated and explain themselves on an older server.
+
+### Added
+
+- **Discovery (RomM 5.3+):** `romm_recommendations` (personal picks with
+  reasons; `refresh` recomputes) and `romm_similar_roms`.
+- **Memory cards (5.3+):** `romm_memory_cards`, `romm_memory_card` (with
+  version history), `romm_rename_memory_card`,
+  `romm_set_memory_card_visibility`, `romm_delete_memory_cards`.
+  Uploading/downloading card images is deliberately not exposed.
+- **Soundtracks (5.3+):** `romm_music_facets` gains `games`, `platforms` and
+  `game-genres`; new `romm_music_stats`.
+- **Streaming (5.3+/5.4+):** `romm_streaming_containers`,
+  `romm_streaming_joinable`, `romm_streaming_join`, `romm_streaming_status`,
+  `romm_streaming_swap_disc`, `romm_streaming_state_picks`.
+- **Notifications (5.4+):** `romm_notifications`,
+  `romm_mark_notifications_read`, `romm_dismiss_notifications`,
+  `romm_send_notification` (own inbox only — recipient targeting is not
+  exposed), `romm_notification_channels`, `romm_apprise_services`,
+  `romm_create_notification_channel`, `romm_update_notification_channel`,
+  `romm_delete_notification_channel`, `romm_test_notification_channel`,
+  `romm_confirm_notification_channel`.
+- **Devices (5.4+):** `romm_device_installs`, `romm_rom_installs`,
+  `romm_install_on_device`, `romm_cancel_install`; `romm_devices` now marks
+  online devices and install capability.
+- **Saves and states:** `romm_states` (list save states), `romm_update_save`
+  and `romm_update_state` (favourite / labels / rename, 5.4+);
+  `romm_saves` shows favourite, labels, visibility and device-sync
+  attribution.
+- **Collections (5.4+):** `romm_set_collection_visibility`.
+- **Audit (5.4+):** `romm_audit_events` — your own trail (everyone's for an
+  admin), filterable by action, category, target, text and time window.
+- **`romm_scan_library`** takes `scan_type` and `platform_ids` on 5.4+ via
+  the new scan endpoint; older servers fall back to the task runner.
+- **Config:** `ROMM_PASSWORD_FILE` (password from a file),
+  `ROMM_READ_ONLY` (refuses every non-GET request inside the HTTP helper),
+  `ROMM_WRITE_TIERS` (opt-in `notifications` → `me.write`, `devices` →
+  `devices.write`, `assets` → `assets.write`; none requested by default).
+  `romm_status` reports both.
+
+### Security
+
+- The three new write scopes are opt-in, per tier, and still negotiated —
+  a tier the server or account refuses is dropped without taking down the
+  rest, and the tools that need it say so.
+- Free text written by other users or services (notes, notification bodies,
+  labels, channel names, audit targets, usernames) is rendered through one
+  helper that strips control characters, collapses newlines and caps
+  length. Channel targets and secrets are masked and never echoed.
+- Destructive additions (`romm_delete_memory_cards`,
+  `romm_dismiss_notifications`, `romm_delete_notification_channel`,
+  `romm_cancel_install`) carry `destructiveHint`.
+
+### Changed
+
+- `fastmcp` is now pinned `>=2.0.0,<4` — the server runs on both 2.x and
+  3.x, and the upper bound keeps a rebuild from picking up a future major
+  unreviewed.
+
 ## 1.3.0
 
 RomM 5.1 and 5.2 coverage — 18 new tools (58 total), plus MCP annotations on

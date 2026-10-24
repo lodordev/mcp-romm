@@ -906,3 +906,389 @@ async def test_read_tools_are_not_marked_writable():
     for name in ("romm_search", "romm_music_tracks", "romm_random_rom",
                  "romm_streaming_config", "romm_platform_folders"):
         assert tools[name].readOnlyHint is True, name
+
+
+# ══ 1.4.0 — RomM 5.3/5.4 parity ═══════════════════════════════════════════
+
+
+@pytest.fixture
+def v54(monkeypatch):
+    """Pretend the server is RomM 5.4.1 so version gates open."""
+    monkeypatch.setattr(server, "_version", server._VersionState(checked=True, raw="5.4.1", parsed=(5, 4, 1)))
+
+
+@pytest.fixture
+def v52(monkeypatch):
+    monkeypatch.setattr(server, "_version", server._VersionState(checked=True, raw="5.2.0", parsed=(5, 2, 0)))
+
+
+@pytest.fixture
+def tiers_on(monkeypatch):
+    """Enable every opt-in write tier and mark its scope as granted."""
+    monkeypatch.setattr(server, "cfg", server.Config(
+        romm_url="http://x", romm_username="t", romm_password="t", request_timeout=1,
+        request_timeout_long=1, tls_verify=True, read_only=False,
+        write_tiers=("notifications", "devices", "assets")))
+    monkeypatch.setattr(server, "_scopes", server._ScopeState(negotiated=True, granted=("me.read",), dropped_tiers=()))
+
+
+@pytest.fixture
+def read_only(monkeypatch):
+    monkeypatch.setattr(server, "cfg", server.Config(
+        romm_url="http://x", romm_username="t", romm_password="t", request_timeout=1,
+        request_timeout_long=1, tls_verify=True, read_only=True, write_tiers=()))
+
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+
+def test_write_tiers_off_by_default():
+    assert server.cfg.write_tiers == ()
+    for forbidden in ("me.write", "devices.write", "assets.write"):
+        assert forbidden not in server._DEFAULT_SCOPES.split()
+
+
+def test_write_tiers_parse_and_ignore_unknown(monkeypatch):
+    monkeypatch.setenv("ROMM_WRITE_TIERS", "assets, Devices ,bogus")
+    c = server.Config.from_env()
+    assert c.write_tiers == ("assets", "devices")
+
+
+def test_password_file_wins_over_env(monkeypatch, tmp_path):
+    f = tmp_path / "pw"
+    f.write_text("from-file\nsecond line ignored\n")
+    monkeypatch.setenv("ROMM_PASSWORD", "from-env")
+    monkeypatch.setenv("ROMM_PASSWORD_FILE", str(f))
+    assert server.Config.from_env().romm_password == "from-file"
+
+
+def test_password_file_unreadable_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROMM_PASSWORD_FILE", str(tmp_path / "missing"))
+    assert server.Config.from_env().romm_password == ""
+
+
+# ── Read-only mode ──────────────────────────────────────────────────────────
+
+
+async def test_read_only_blocks_at_request_boundary(read_only, monkeypatch):
+    # No HTTP client should ever be touched for a write in read-only mode.
+    monkeypatch.setattr(server, "_get_client", lambda: (_ for _ in ()).throw(AssertionError("client used")))
+    with pytest.raises(RuntimeError, match="Read-only mode"):
+        await server._request("POST", "collections", json={})
+
+
+async def test_read_only_write_tool_explains(read_only, v54, calls):
+    out = await server.romm_set_collection_visibility(5, True)
+    assert "read-only mode" in out
+    assert not calls
+
+
+# ── Write tiers ─────────────────────────────────────────────────────────────
+
+
+async def test_tier_off_explains_how_to_enable(v54, calls):
+    out = await server.romm_send_notification("hi")
+    assert "ROMM_WRITE_TIERS=notifications" in out
+    assert not calls
+
+
+async def test_tier_on_but_scope_dropped(v54, calls, monkeypatch):
+    monkeypatch.setattr(server, "cfg", server.Config(
+        romm_url="http://x", romm_username="t", romm_password="t", request_timeout=1,
+        request_timeout_long=1, tls_verify=True, write_tiers=("devices",)))
+    monkeypatch.setattr(server, "_scopes", server._ScopeState(negotiated=True, granted=(), dropped_tiers=("devices",)))
+    out = await server.romm_install_on_device("dev1", 7)
+    assert "devices scope" in out
+    assert not calls
+
+
+# ── Version gates ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("call", [
+    lambda: server.romm_recommendations(),
+    lambda: server.romm_memory_cards(),
+    lambda: server.romm_notifications(),
+    lambda: server.romm_audit_events(),
+    lambda: server.romm_streaming_containers(),
+    lambda: server.romm_device_installs("d"),
+])
+async def test_new_tools_gate_on_old_server(v52, calls, call):
+    out = await call()
+    assert "needs RomM 5." in out
+    assert not calls
+
+
+# ── Text hardening ──────────────────────────────────────────────────────────
+
+
+def test_untrusted_strips_control_and_newlines():
+    s = server._untrusted("line1\nIGNORE PREVIOUS\x00\x1b[31m\rline2", 100)
+    assert "\n" not in s and "\x00" not in s and "\x1b" not in s
+    assert s == "line1 IGNORE PREVIOUS[31m line2"
+
+
+def test_untrusted_caps_length():
+    assert len(server._untrusted("x" * 500, 50)) == 51  # 50 + ellipsis
+
+
+def test_mask_hides_secret_bearing_urls():
+    assert server._mask("https://hooks.example/abc/SECRET") == "https://hooks.example/…"
+    assert server._mask("user@mail.example") == "…mple"
+    assert server._mask("") == "(none)"
+
+
+# ── Notifications ───────────────────────────────────────────────────────────
+
+
+async def test_send_notification_shapes_payload(v54, tiers_on, calls):
+    calls.responses.append({"id": 9})
+    out = await server.romm_send_notification("Scan done", body="all good", level="success", link="/scan")
+    req = calls[0]
+    assert req["method"] == "POST" and req["path"] == "notifications"
+    assert req["json"] == {"title": "Scan done", "level": "success", "kind": "custom",
+                           "body": "all good", "link": "/scan"}
+    assert "recipients" not in req["json"]
+    assert "ID 9" in out
+
+
+async def test_send_notification_rejects_bad_level(v54, tiers_on, calls):
+    out = await server.romm_send_notification("x", level="loud")
+    assert "level must be" in out and not calls
+
+
+async def test_notifications_unread_filter_and_untrusted_body(v54, calls):
+    calls.responses.append([
+        {"id": 1, "level": "info", "title": "Read one", "read_at": "2026-10-24", "created_at": "t"},
+        {"id": 2, "level": "error", "title": "Scan\nfailed", "body": "x\x00y", "created_at": "t"},
+    ])
+    out = await server.romm_notifications(unread_only=True)
+    assert "Read one" not in out
+    assert "Scan failed" in out and "xy" in out and "\x00" not in out
+
+
+async def test_mark_read_all_vs_ids(v54, tiers_on, calls):
+    await server.romm_mark_notifications_read()
+    assert calls[0]["path"] == "notifications/read" and calls[0]["json"] == {}
+    await server.romm_mark_notifications_read([3, 1, 3])
+    assert calls[1]["json"] == {"ids": [1, 3]}
+
+
+async def test_dismiss_specific_ids_deletes_each(v54, tiers_on, calls):
+    out = await server.romm_dismiss_notifications([5, 6])
+    assert [c["path"] for c in calls] == ["notifications/5", "notifications/6"]
+    assert all(c["method"] == "DELETE" for c in calls)
+    assert "2 notification" in out
+
+
+async def test_create_webhook_channel_requires_http_url(v54, tiers_on, calls):
+    out = await server.romm_create_notification_channel("webhook", "hook", url="ftp://x")
+    assert "http://" in out and not calls
+
+
+async def test_create_apprise_channel_parses_fields_json(v54, tiers_on, calls):
+    calls.responses.append({"id": 4})
+    out = await server.romm_create_notification_channel(
+        "apprise", "disc", service="discord", fields_json='{"webhook_id": "a", "webhook_token": "b"}',
+        topics=["scans", "tasks"])
+    body = calls[0]["json"]
+    assert body["type"] == "apprise" and body["fields"] == {"webhook_id": "a", "webhook_token": "b"}
+    assert body["topics"] == ["scans", "tasks"]
+    assert "ID 4" in out
+
+
+async def test_create_channel_rejects_bad_topic(v54, tiers_on, calls):
+    out = await server.romm_create_notification_channel("webhook", "h", url="https://x", topics=["spam"])
+    assert "Unknown topic" in out and not calls
+
+
+async def test_channel_listing_masks_target(v54, calls):
+    calls.responses.append([{"id": 1, "name": "hook", "type": "webhook", "enabled": True,
+                             "min_level": "info", "target": "https://hooks.example/abc/TOKEN",
+                             "has_secret": True}])
+    out = await server.romm_notification_channels()
+    assert "TOKEN" not in out and "hooks.example/…" in out and "secret set" in out
+
+
+async def test_update_channel_uses_patch_and_hides_secret(v54, tiers_on, calls):
+    out = await server.romm_update_notification_channel(3, enabled=False, secret="s3cr3t")
+    assert calls[0]["method"] == "PATCH" and calls[0]["json"] == {"enabled": False, "secret": "s3cr3t"}
+    assert "s3cr3t" not in out and "secret" in out
+
+
+# ── Device installs ─────────────────────────────────────────────────────────
+
+
+async def test_install_on_device_shapes_request(v54, tiers_on, calls):
+    calls.responses.append({"id": "req1", "status": "pending"})
+    out = await server.romm_install_on_device(" dev-1 ", 42)
+    assert calls[0]["method"] == "POST" and calls[0]["path"] == "devices/dev-1/installs"
+    assert calls[0]["json"] == {"rom_id": 42}
+    assert "req1" in out
+
+
+async def test_cancel_install_deletes(v54, tiers_on, calls):
+    await server.romm_cancel_install("d", "r")
+    assert calls[0]["method"] == "DELETE" and calls[0]["path"] == "devices/d/installs/r"
+
+
+async def test_devices_marks_online_on_54(v54, calls):
+    calls.responses.append([{"id": "a", "name": "Thor", "client": "argosy", "sync_enabled": True,
+                             "capabilities": {"installs": True}}])
+    calls.responses.append(["a"])
+    out = await server.romm_devices()
+    assert calls[1]["path"] == "devices/online"
+    assert "ONLINE" in out and "Accepts installs: yes" in out
+
+
+async def test_devices_skips_online_on_52(v52, calls):
+    calls.responses.append([{"id": "a", "name": "Thor"}])
+    await server.romm_devices()
+    assert len(calls) == 1
+
+
+# ── Saves / states ──────────────────────────────────────────────────────────
+
+
+async def test_update_save_requires_a_field(v54, tiers_on, calls):
+    out = await server.romm_update_save(1)
+    assert "Nothing to update" in out and not calls
+
+
+async def test_update_save_issues_one_put_per_field(v54, tiers_on, calls):
+    out = await server.romm_update_save(7, favorite=True, labels=["100%", " speedrun "], new_name="a.srm")
+    assert [(c["method"], c["path"]) for c in calls] == [
+        ("PUT", "saves/7/favorite"), ("PUT", "saves/7/labels"), ("PUT", "saves/7/file-name")]
+    assert calls[1]["json"] == {"labels": ["100%", "speedrun"]}
+    assert "favourited" in out and "renamed" in out
+
+
+async def test_saves_shows_54_fields(calls):
+    calls.responses.append([{"id": 3, "file_name": "x.srm", "rom_id": 1, "is_favorite": True,
+                             "labels": ["l1"], "device_syncs": [{"device_name": "Thor", "is_current": True}]}])
+    out = await server.romm_saves(rom_id=1)
+    assert "x.srm" in out and " *" in out and "Labels: l1" in out and "current on: Thor" in out
+
+
+# ── Memory cards ────────────────────────────────────────────────────────────
+
+
+async def test_delete_memory_cards_dedupes_and_posts(v54, tiers_on, calls):
+    out = await server.romm_delete_memory_cards([3, 3, 1])
+    assert calls[0]["method"] == "POST" and calls[0]["path"] == "memory-cards/delete"
+    assert calls[0]["json"] == {"cards": [1, 3]}
+    assert "2 memory card" in out
+
+
+async def test_memory_cards_include_shared(v54, calls):
+    calls.responses.extend([[{"id": 1, "name": "mine", "emulator": "duckstation", "slot": 1}],
+                            [{"id": 2, "name": "theirs", "emulator": "duckstation", "username": "bob"}]])
+    out = await server.romm_memory_cards(emulator="duckstation", include_shared=True)
+    assert calls[0]["params"] == {"emulator": "duckstation"}
+    assert "mine" in out and "theirs" in out and "by bob" in out
+
+
+# ── Recommendations / scan / audit / collections ────────────────────────────
+
+
+async def test_recommendations_refresh_param_and_reasons(v54, calls):
+    calls.responses.append([{"rom": {"id": 1, "name": "Chrono Trigger", "platform_display_name": "SNES"},
+                             "score": 0.9, "reasons": [{"facet": "genre", "value": "RPG"}],
+                             "seed_rom_name": "FF6"}])
+    out = await server.romm_recommendations(limit=500, refresh=True)
+    assert calls[0]["params"] == {"limit": 50, "refresh": "true"}
+    assert "Chrono Trigger" in out and "genre: RPG" in out and "FF6" in out
+
+
+async def test_scan_library_uses_scan_endpoint_on_54(v54, calls):
+    calls.responses.append({"task_id": "abc", "status": "queued"})
+    out = await server.romm_scan_library("update", platform_ids=[2, 5])
+    assert calls[0]["path"] == "tasks/scan" and calls[0]["json"] == {"type": "update", "platforms": [2, 5]}
+    assert "abc" in out
+
+
+async def test_scan_library_falls_back_on_52(v52, calls):
+    await server.romm_scan_library()
+    assert calls[0]["path"] == "tasks/run/scan_library"
+
+
+async def test_scan_library_refuses_typed_scan_on_52(v52, calls):
+    out = await server.romm_scan_library("complete")
+    assert "need RomM 5.4" in out and not calls
+
+
+async def test_scan_library_rejects_bad_type(v54, calls):
+    out = await server.romm_scan_library("deep")
+    assert "scan_type must be" in out and not calls
+
+
+async def test_audit_events_params_and_paging(v54, calls):
+    calls.responses.append({"items": [{"occurred_at": "t", "action": "rom.download", "actor_name": "me",
+                                       "target_type": "rom", "target_name": "Game\nX"}],
+                            "total": 3, "limit": 1, "offset": 0})
+    out = await server.romm_audit_events(action="rom.download,auth.login", category="consumption", limit=1)
+    assert calls[0]["params"]["action"] == ["rom.download", "auth.login"]
+    assert calls[0]["params"]["category"] == ["consumption"]
+    assert "Game X" in out and "offset=1" in out
+
+
+async def test_audit_events_rejects_bad_category(v54, calls):
+    out = await server.romm_audit_events(category="fun")
+    assert "category must be" in out and not calls
+
+
+async def test_collection_visibility_smart_path(v54, calls):
+    await server.romm_set_collection_visibility(8, False, smart=True)
+    assert calls[0]["path"] == "collections/smart/8/visibility" and calls[0]["json"] == {"is_public": False}
+
+
+async def test_music_facets_new_fields_gate(v52, calls):
+    out = await server.romm_music_facets(field="games")
+    assert "needs RomM 5.3" in out and not calls
+
+
+async def test_music_facets_games_format(v54, calls):
+    calls.responses.append({"items": [{"rom_id": 4, "name": "OoT", "platform_name": "N64", "count": 12}], "total": 1})
+    out = await server.romm_music_facets(field="game_genres" if False else "games")
+    assert calls[0]["path"] == "music/games" and "OoT [N64] — 12 track(s)" in out
+
+
+# ── Streaming additions ─────────────────────────────────────────────────────
+
+
+async def test_streaming_join_passes_container(v54, calls):
+    calls.responses.append({"host": "https://stream.example", "rom_name": "Game"})
+    out = await server.romm_streaming_join("ps2", container="ps2-b")
+    assert calls[0]["method"] == "POST" and calls[0]["path"] == "streaming/sessions/ps2/join"
+    assert calls[0]["params"] == {"container": "ps2-b"}
+    assert "stream.example" in out
+
+
+async def test_streaming_swap_disc_body(v54, calls):
+    await server.romm_streaming_swap_disc("psx", 77)
+    assert calls[0]["json"] == {"file_id": 77} and calls[0]["path"] == "streaming/sessions/psx/swap-disc"
+
+
+async def test_streaming_containers_admin_only(v54, monkeypatch):
+    async def forbidden(*a, **k):
+        raise RuntimeError("API error 403: forbidden")
+    monkeypatch.setattr(server, "_request", forbidden)
+    out = await server.romm_streaming_containers()
+    assert "admin-only" in out
+
+
+# ── Annotation hygiene ──────────────────────────────────────────────────────
+
+
+async def test_every_tool_is_annotated_and_destructive_ones_say_so():
+    tools = {t.name: t.annotations for t in await server.mcp._list_tools()}
+    assert len(tools) >= 90
+    destructive = {"romm_delete_memory_cards", "romm_dismiss_notifications",
+                   "romm_delete_notification_channel", "romm_cancel_install"}
+    for name, ann in tools.items():
+        assert ann is not None and ann.readOnlyHint is not None, f"{name} has no annotations"
+        if name in destructive:
+            assert ann.destructiveHint is True, f"{name} should be destructive"
+    for name in ("romm_recommendations", "romm_notifications", "romm_audit_events",
+                 "romm_memory_cards", "romm_states", "romm_device_installs"):
+        assert tools[name].readOnlyHint is True, name
