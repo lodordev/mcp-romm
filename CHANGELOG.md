@@ -81,6 +81,9 @@ version-gated and explain themselves on an older server.
   emulator); Apprise channels are admin-only server-side and the tools say
   so; a ROM whose platform has no streaming container gets a clear message
   from `romm_streaming_state_picks`.
+- The ruff rule set is pinned in `pyproject.toml` so CI no longer drifts with
+  ruff releases; the lint it keeps was fixed (exception chaining, ambiguous
+  names, escaped invisibles in a test).
 - `fastmcp` is now pinned `>=2.0.0,<4` — the server runs on both 2.x and
   3.x, and the upper bound keeps a rebuild from picking up a future major
   unreviewed.

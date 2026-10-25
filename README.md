@@ -318,8 +318,11 @@ existing card or session and are unit-tested instead.
 
 ## Known issues
 
-All three are RomM 5.0.0 server-side issues, found by running this server's
-live e2e suite (`smoke_test.py`) against a 5.0.0 instance:
+**On RomM 5.4.1 none of these reproduce:** the live suite passes 83 of 83
+checks against a 5.4.1 instance as a least-privilege account (notes list,
+filters endpoint and REST-triggered scans all work). The items below are
+kept for anyone still on 5.0.0, where they were found by running
+`smoke_test.py`:
 
 - **`romm_filters` times out.** `GET /api/roms/filters` in RomM 5.0.0 executes
   a query with a cartesian product (RomM's log flags it at
