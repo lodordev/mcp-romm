@@ -17,7 +17,7 @@ import pytest
 os.environ.setdefault("ROMM_USERNAME", "tester")
 os.environ.setdefault("ROMM_PASSWORD", "secret")
 
-import server  # noqa: E402
+import server
 
 
 class _Recorder(list):
@@ -1374,12 +1374,13 @@ def test_read_only_narrows_requested_scopes(monkeypatch):
         assert "tasks.run" not in requested
         assert "me.read" in requested and "roms.read" in requested
     finally:
-        monkeypatch.delenv("ROMM_READ_ONLY"); monkeypatch.delenv("ROMM_WRITE_TIERS")
+        monkeypatch.delenv("ROMM_READ_ONLY")
+        monkeypatch.delenv("ROMM_WRITE_TIERS")
         importlib.reload(server)
 
 
 def test_untrusted_strips_unicode_invisibles():
-    s = server._untrusted("A‮B​C\U000e0041D\x85E", 50)
+    s = server._untrusted("A\u202eB\u200bC\U000e0041D\x85E", 50)
     assert s == "ABCDE"
 
 

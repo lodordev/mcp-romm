@@ -139,6 +139,7 @@ Security:
 
 from __future__ import annotations
 
+import ipaddress
 import json as jsonlib
 import logging
 import os
@@ -146,8 +147,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-
-import ipaddress
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -451,9 +450,9 @@ async def _acquire_token() -> str:
         _token.expires_at = now + data.get("expires", 1800)
         return _token.access_token
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"RomM auth failed ({e.response.status_code}): {e.response.text[:200]}")
+        raise RuntimeError(f"RomM auth failed ({e.response.status_code}): {e.response.text[:200]}") from None
     except Exception as e:
-        raise RuntimeError(f"RomM auth failed: {e}")
+        raise RuntimeError(f"RomM auth failed: {e}") from None
 
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────
@@ -509,13 +508,13 @@ async def _request(
             return {"_text": resp.text}
         return resp.json()
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"API error {e.response.status_code}: {e.response.text[:200]}")
+        raise RuntimeError(f"API error {e.response.status_code}: {e.response.text[:200]}") from None
     except httpx.TimeoutException:
-        raise RuntimeError(f"Request timed out after {req_timeout}s")
+        raise RuntimeError(f"Request timed out after {req_timeout}s") from None
     except RuntimeError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Request failed: {e}")
+        raise RuntimeError(f"Request failed: {e}") from None
 
 
 async def _get(path: str, *, params: dict | None = None, long_timeout: bool = False,
@@ -713,10 +712,10 @@ def _webhook_url_problem(url: str) -> str | None:
 
 def _link_problem(link: str) -> str | None:
     """Notification links may be a RomM-relative path or an http(s) URL only."""
-    l = link.strip()
-    if l.startswith("/") and not l.startswith("//"):
+    target = link.strip()
+    if target.startswith("/") and not target.startswith("//"):
         return None
-    if l.lower().startswith(("http://", "https://")):
+    if target.lower().startswith(("http://", "https://")):
         return None
     return "link must be a path starting with / or an http(s):// URL."
 
@@ -1404,7 +1403,7 @@ async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
         # RomM 5.4 adds labels, visibility and device-sync attribution.
         labels = s.get("labels") or []
         if labels:
-            lines.append(f"    Labels: {', '.join(_untrusted(l, 40) for l in labels[:10])}")
+            lines.append(f"    Labels: {', '.join(_untrusted(lab, 40) for lab in labels[:10])}")
         syncs = s.get("device_syncs") or []
         if syncs:
             current = [x.get("device_name") or x.get("device_id", "?") for x in syncs
@@ -3558,7 +3557,7 @@ async def romm_states(rom_id: int = 0, platform_id: int = 0) -> str:
             lines.append(f"    Updated: {s['updated_at']}")
         labels = s.get("labels") or []
         if labels:
-            lines.append(f"    Labels: {', '.join(_untrusted(l, 40) for l in labels[:10])}")
+            lines.append(f"    Labels: {', '.join(_untrusted(lab, 40) for lab in labels[:10])}")
         if s.get("is_public"):
             lines.append("    Visibility: public")
         lines.append(f"    ID: {s.get('id', '?')}")
@@ -3581,7 +3580,7 @@ async def _edit_asset(kind: str, asset_id: int, favorite: bool | None, labels: l
         await _put(f"{kind}s/{asset_id}/favorite", {"is_favorite": bool(favorite)})
         done.append("favourited" if favorite else "unfavourited")
     if labels is not None:
-        clean = [_untrusted(l, 40) for l in labels if str(l).strip()]
+        clean = [_untrusted(lab, 40) for lab in labels if str(lab).strip()]
         await _put(f"{kind}s/{asset_id}/labels", {"labels": clean})
         done.append(f"labels set to [{', '.join(clean)}]" if clean else "labels cleared")
     if new_name.strip():
